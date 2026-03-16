@@ -14,6 +14,9 @@
 #include <mutex>
 #include <unordered_map>
 #include <functional>
+#include <fstream>
+#include <filesystem>
+#include <regex>
 
 using json = nlohmann::json;
 
@@ -61,6 +64,112 @@ static json substitute_params(const json& operations, const json& params) {
 
     walk(result);
     return result;
+}
+
+// ---- State propagation: resolve $result[N].field references ----
+// Walks JSON and replaces strings like "$result[0].address" with the value
+// from previous operation results.
+static json resolve_result_refs(const json& operations, const json& results) {
+    auto resolved = operations;
+
+    std::function<void(json&)> walk = [&](json& node) {
+        if (node.is_string()) {
+            auto s = node.get<std::string>();
+            // Match $result[N] or $result[N].field.subfield
+            std::regex ref_regex(R"(\$result\[(\d+)\](?:\.(\S+))?)");
+            std::smatch match;
+            if (std::regex_match(s, match, ref_regex)) {
+                int idx = std::stoi(match[1].str());
+                std::string path = match[2].str();
+
+                if (idx >= 0 && idx < static_cast<int>(results.size())) {
+                    json val = results[idx];
+
+                    // Navigate the path (e.g., "address" or "position.x")
+                    if (!path.empty()) {
+                        std::istringstream ss(path);
+                        std::string segment;
+                        while (std::getline(ss, segment, '.')) {
+                            if (val.is_object() && val.contains(segment)) {
+                                val = val[segment];
+                            } else {
+                                // Path not found — keep original string
+                                return;
+                            }
+                        }
+                    }
+                    node = val;
+                }
+            }
+        } else if (node.is_object()) {
+            for (auto& [k, v] : node.items()) {
+                walk(v);
+            }
+        } else if (node.is_array()) {
+            for (auto& v : node) {
+                walk(v);
+            }
+        }
+    };
+
+    walk(resolved);
+    return resolved;
+}
+
+// ---- Persistence: save/load macros to disk ----
+static std::filesystem::path get_macros_file() {
+    auto& api = uevr::API::get();
+    if (!api) return {};
+    return api->get_persistent_dir() / "macros.json";
+}
+
+static void save_macros_to_disk() {
+    auto path = get_macros_file();
+    if (path.empty()) return;
+
+    json all = json::object();
+    // Caller must hold s_macro_mutex
+    for (const auto& [name, macro] : s_macros) {
+        all[name] = json{
+            {"name", macro.name},
+            {"description", macro.description},
+            {"operations", macro.operations}
+        };
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+
+    std::ofstream out(path, std::ios::binary);
+    if (out) {
+        out << all.dump(2);
+    }
+}
+
+static void load_macros_from_disk() {
+    auto path = get_macros_file();
+    if (path.empty()) return;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return;
+
+    try {
+        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto all = json::parse(content);
+
+        std::lock_guard<std::mutex> lock(s_macro_mutex);
+        for (auto it = all.begin(); it != all.end(); ++it) {
+            MacroDefinition macro;
+            macro.name = it.value().value("name", it.key());
+            macro.description = it.value().value("description", "");
+            macro.operations = it.value().value("operations", json::array());
+            s_macros[macro.name] = std::move(macro);
+        }
+
+        PipeServer::get().log("Macro: loaded " + std::to_string(s_macros.size()) + " macros from disk");
+    } catch (...) {
+        PipeServer::get().log("Macro: failed to load macros.json");
+    }
 }
 
 // ---- Single operation executor ----
@@ -202,6 +311,9 @@ static void send_json(httplib::Response& res, const json& data, int status = 200
 
 void register_routes(httplib::Server& server) {
 
+    // Load saved macros from disk on startup
+    load_macros_from_disk();
+
     // POST /api/macro/save -- Save a named macro (sequence of operations)
     server.Post("/api/macro/save", [](const httplib::Request& req, httplib::Response& res) {
         json body;
@@ -240,6 +352,9 @@ void register_routes(httplib::Server& server) {
 
         PipeServer::get().log("Macro: saved '" + name + "' with " +
                               std::to_string(operations.size()) + " operations");
+
+        // Persist to disk
+        save_macros_to_disk();
 
         send_json(res, json{
             {"success", true},
@@ -284,11 +399,16 @@ void register_routes(httplib::Server& server) {
         PipeServer::get().log("Macro: playing '" + name + "' (" +
                               std::to_string(operations.size()) + " operations)");
 
-        // Execute all operations on the game thread as a batch
+        // Execute all operations on the game thread with state propagation
         auto result = GameThreadQueue::get().submit_and_wait([operations, name]() -> json {
             json results = json::array();
 
-            for (const auto& op : operations) {
+            for (size_t i = 0; i < operations.size(); i++) {
+                // Resolve $result[N].field references from previous results
+                json op = operations[i];
+                if (!results.empty()) {
+                    op = resolve_result_refs(op, results);
+                }
                 results.push_back(execute_operation(op));
             }
 
@@ -345,6 +465,9 @@ void register_routes(httplib::Server& server) {
             }
             s_macros.erase(it);
         }
+
+        // Persist to disk
+        save_macros_to_disk();
 
         PipeServer::get().log("Macro: deleted '" + name + "'");
 

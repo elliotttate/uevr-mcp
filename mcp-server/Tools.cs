@@ -402,6 +402,31 @@ public static class LuaTools
         [Description("Filename to delete")] string filename,
         [Description("Delete from autorun folder (default false)")] bool autorun = false)
         => await Http.Delete("/api/lua/scripts/delete", new { filename, autorun });
+
+    [McpServerTool(Name = "uevr_lua_reload")]
+    [Description("Hot-reload a Lua script file — executes it in the existing Lua state without resetting. Preserves globals, frame callbacks, and timers while re-defining functions from the file. Use after editing a script to apply changes without losing state.")]
+    public static async Task<string> LuaReload(
+        [Description("Filename to reload (e.g. 'my_script.lua')")] string filename,
+        [Description("Reload from autorun folder (default false)")] bool autorun = false)
+        => await Http.Post("/api/lua/reload", new { filename, autorun });
+
+    [McpServerTool(Name = "uevr_lua_globals")]
+    [Description("Inspect top-level Lua global variables — names, types, and values. Use to understand current Lua state without executing diagnostic code. Skips built-in tables and internal variables.")]
+    public static async Task<string> LuaGlobals()
+        => await Http.Get("/api/lua/globals");
+}
+
+// ── Event streaming ───────────────────────────────────────────────
+
+[McpServerToolType]
+public static class EventTools
+{
+    [McpServerTool(Name = "uevr_events_poll")]
+    [Description("Poll for real-time events (hook fires, watch changes, Lua output). Uses long-polling: waits up to timeout for new events, returns immediately if events are already available. Pass the returned 'seq' as 'since' on the next call to get only new events. Event types: 'hook_fire', 'watch_change', 'lua_output'.")]
+    public static async Task<string> EventsPoll(
+        [Description("Sequence number — only return events after this seq (default 0 = all)")] long? since = null,
+        [Description("Max wait time in ms if no events yet (default 5000, max 60000)")] int? timeout = null)
+        => await Http.Get("/api/events", new() { ["since"] = since?.ToString(), ["timeout"] = timeout?.ToString() });
 }
 
 // ── Blueprint tools ────────────────────────────────────────────────
@@ -488,12 +513,13 @@ public static class ScreenshotTools
 public static class WatchTools
 {
     [McpServerTool(Name = "uevr_watch_add")]
-    [Description("Watch a property for changes. The system checks the field every N ticks and records when it changes. Use uevr_watch_changes to see what changed.")]
+    [Description("Watch a property for changes. The system checks the field every N ticks and records when it changes. Use uevr_watch_changes to see what changed. Optionally provide a Lua script that executes on each change — it receives ctx.watch_id, ctx.address, ctx.field_name, ctx.old_value, ctx.new_value, ctx.change_count.")]
     public static async Task<string> WatchAdd(
         [Description("Object address (0xHEX)")] string address,
         [Description("Field name to watch")] string fieldName,
-        [Description("Check interval in ticks (default 1 = every frame)")] int? interval = null)
-        => await Http.Post("/api/watch/add", new { address, fieldName, interval });
+        [Description("Check interval in ticks (default 1 = every frame)")] int? interval = null,
+        [Description("Lua script to execute on change (receives ctx table)")] string? script = null)
+        => await Http.Post("/api/watch/add", new { address, fieldName, interval, script });
 
     [McpServerTool(Name = "uevr_watch_remove")]
     [Description("Remove a property watch by ID.")]
@@ -802,12 +828,13 @@ public static class AssetTools
 public static class HookTools
 {
     [McpServerTool(Name = "uevr_hook_add")]
-    [Description("Hook a UFunction to log calls, block execution, or both. Essential for reverse engineering — see what functions fire when game events happen.")]
+    [Description("Hook a UFunction to log calls, block execution, run Lua callbacks, or combinations. Actions: 'log' (record calls), 'block' (skip execution), 'log_and_block' (both), 'lua' (run Lua script — return false to block), 'lua_block' (run Lua script, always block). For lua/lua_block actions, provide a script parameter with Lua code. The script receives ctx.object_address, ctx.object_name, ctx.function_name, ctx.class_name, ctx.hook_id, ctx.call_count.")]
     public static async Task<string> HookAdd(
         [Description("Class name (e.g. 'Class /Script/Engine.Actor')")] string className,
         [Description("Function name to hook")] string functionName,
-        [Description("Action: 'log' (record calls), 'block' (skip execution), 'log_and_block' (both)")] string action = "log")
-        => await Http.Post("/api/hook/add", new { className, functionName, action });
+        [Description("Action: 'log', 'block', 'log_and_block', 'lua', 'lua_block'")] string action = "log",
+        [Description("Lua script for lua/lua_block actions (receives ctx table with hook context)")] string? script = null)
+        => await Http.Post("/api/hook/add", new { className, functionName, action, script });
 
     [McpServerTool(Name = "uevr_hook_remove")]
     [Description("Remove a function hook by ID.")]
@@ -839,7 +866,7 @@ public static class HookTools
 public static class MacroTools
 {
     [McpServerTool(Name = "uevr_macro_save")]
-    [Description("Save a reusable macro — a named sequence of operations (same format as batch). Use $paramName placeholders for parameterized values.")]
+    [Description("Save a reusable macro — a named sequence of operations (same format as batch). Use $paramName placeholders for parameterized values. Macros persist to disk across game restarts.")]
     public static async Task<string> MacroSave(
         [Description("Macro name")] string name,
         [Description("Array of operations (batch format)")] JsonElement operations,
@@ -847,7 +874,7 @@ public static class MacroTools
         => await Http.Post("/api/macro/save", new { name, operations, description });
 
     [McpServerTool(Name = "uevr_macro_play")]
-    [Description("Execute a saved macro. Pass params to substitute $placeholders in operations.")]
+    [Description("Execute a saved macro with state propagation. Pass params to substitute $placeholders. Use $result[N].field to reference previous operation results (e.g. $result[0].address uses the address from the first operation's result).")]
     public static async Task<string> MacroPlay(
         [Description("Macro name")] string name,
         [Description("Parameters to substitute (e.g. {address: '0x...'})")] JsonElement? @params = null)
@@ -869,4 +896,63 @@ public static class MacroTools
     public static async Task<string> MacroGet(
         [Description("Macro name")] string name)
         => await Http.Get("/api/macro/get", new() { ["name"] = name });
+}
+
+// ── Discovery tools ────────────────────────────────────────────────
+
+[McpServerToolType]
+public static class DiscoveryTools
+{
+    [McpServerTool(Name = "uevr_subclasses")]
+    [Description("Find ALL subclasses of a given base class. Essential for discovering game-specific types — e.g., find all subclasses of Character to discover enemy/NPC classes. Optionally shows live instance counts.")]
+    public static async Task<string> Subclasses(
+        [Description("Base class name (e.g. 'Class /Script/Engine.Character' or '/Script/Engine.Pawn')")] string className,
+        [Description("Max results (default 100)")] int? limit = null,
+        [Description("Include live instance count per class (default false, slower)")] bool? includeInstances = null)
+        => await Http.Get("/api/discovery/subclasses", new() {
+            ["className"] = className, ["limit"] = limit?.ToString(),
+            ["includeInstances"] = includeInstances?.ToString()?.ToLower()
+        });
+
+    [McpServerTool(Name = "uevr_search_names")]
+    [Description("Search ALL reflected names in the engine — class names, property names, function names. Catches names that uevr_search_objects misses (types without live instances, field names on uninstantiated classes). Use scope to narrow: 'all', 'classes', 'properties', 'functions'.")]
+    public static async Task<string> SearchNames(
+        [Description("Name substring to search (case-insensitive)")] string query,
+        [Description("Max results (default 100)")] int? limit = null,
+        [Description("Scope: 'all' (default), 'classes', 'properties', 'functions'")] string? scope = null)
+        => await Http.Get("/api/discovery/names", new() {
+            ["query"] = query, ["limit"] = limit?.ToString(), ["scope"] = scope
+        });
+
+    [McpServerTool(Name = "uevr_delegates")]
+    [Description("Inspect delegates and event functions on an object. Finds all delegate properties (OnTakeDamage, OnDeath, etc.) and event-pattern functions (On*, Receive*, Handle*, Notify*, BP_*, K2_*). Essential for understanding what gameplay events an object responds to.")]
+    public static async Task<string> Delegates(
+        [Description("Object address (0xHEX)")] string address)
+        => await Http.Get("/api/discovery/delegates", new() { ["address"] = address });
+
+    [McpServerTool(Name = "uevr_vtable")]
+    [Description("Compare an object's virtual function table against its parent class. Shows which C++ virtual functions are overridden — these are the game-specific implementations. Each entry shows the function address, module, and RVA for use with disassemblers.")]
+    public static async Task<string> Vtable(
+        [Description("Object address (0xHEX)")] string address,
+        [Description("Number of vtable entries to read (default 64, max 256)")] int? entries = null)
+        => await Http.Get("/api/discovery/vtable", new() {
+            ["address"] = address, ["entries"] = entries?.ToString()
+        });
+
+    [McpServerTool(Name = "uevr_pattern_scan")]
+    [Description("Search executable memory for byte patterns (signature scanning). Use ? for wildcard bytes. Returns matching addresses with module and RVA info. Useful for finding specific native functions.")]
+    public static async Task<string> PatternScan(
+        [Description("Hex byte pattern with ? wildcards (e.g. '48 89 5C 24 ? 57 48 83 EC 20')")] string pattern,
+        [Description("Module name to scan (default: main exe)")] string? module = null,
+        [Description("Max matches (default 10)")] int? limit = null)
+        => await Http.Post("/api/discovery/pattern_scan", new { pattern, module, limit });
+
+    [McpServerTool(Name = "uevr_all_children")]
+    [Description("Brute-force enumerate ALL properties and functions on a type, walking the full inheritance chain. More thorough than uevr_get_type — includes delegate functions, sparse delegates, and non-standard entries. Shows which class each member is declared in.")]
+    public static async Task<string> AllChildren(
+        [Description("Type name (e.g. 'Class /Script/Engine.Character')")] string typeName,
+        [Description("How many super-class levels to walk (default: all)")] int? depth = null)
+        => await Http.Get("/api/discovery/all_children", new() {
+            ["typeName"] = typeName, ["depth"] = depth?.ToString()
+        });
 }

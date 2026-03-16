@@ -2,6 +2,7 @@
 #include "../lua/lua_engine.h"
 #include "../game_thread_queue.h"
 #include "../pipe_server.h"
+#include "../event_bus.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -184,6 +185,117 @@ void register_routes(httplib::Server& server) {
 
         std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         send_json(res, json{{"filename", filename}, {"autorun", autorun}, {"content", content}});
+    });
+
+    // POST /api/lua/reload — Hot-reload a script file (preserves existing state)
+    server.Post("/api/lua/reload", [](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            send_json(res, json{{"error", "Invalid JSON body"}}, 400);
+            return;
+        }
+
+        auto filename = body.value("filename", "");
+        bool autorun = body.value("autorun", false);
+
+        if (filename.empty()) {
+            send_json(res, json{{"error", "Missing 'filename'"}}, 400);
+            return;
+        }
+
+        if (filename.find("..") != std::string::npos || filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
+            send_json(res, json{{"error", "Invalid filename"}}, 400);
+            return;
+        }
+
+        auto& api = uevr::API::get();
+        if (!api) {
+            send_json(res, json{{"error", "API not available"}}, 500);
+            return;
+        }
+
+        auto base_dir = api->get_persistent_dir();
+        auto scripts_dir = autorun ? (base_dir / "scripts" / "autorun") : (base_dir / "scripts");
+        auto filepath = scripts_dir / filename;
+
+        PipeServer::get().log("Lua: reload script " + filepath.string());
+
+        auto result = GameThreadQueue::get().submit_and_wait([fp = filepath.string()]() {
+            return LuaEngine::get().reload_script(fp);
+        });
+
+        if (result.contains("error") && !result.contains("success")) {
+            send_json(res, result);
+        } else {
+            res.status = 200;
+            res.set_content(result.dump(2), "application/json");
+        }
+    });
+
+    // GET /api/lua/globals — Inspect top-level Lua globals
+    server.Get("/api/lua/globals", [](const httplib::Request&, httplib::Response& res) {
+        auto result = GameThreadQueue::get().submit_and_wait([]() {
+            return LuaEngine::get().get_globals();
+        });
+        send_json(res, result);
+    });
+
+    // GET /api/events — Server-Sent Events stream for real-time events
+    server.Get("/api/events", [](const httplib::Request& req, httplib::Response& res) {
+        // Parse optional since_seq parameter
+        uint64_t since_seq = 0;
+        if (req.has_param("since")) {
+            try { since_seq = std::stoull(req.get_param_value("since")); } catch (...) {}
+        }
+        int timeout_ms = 30000;
+        if (req.has_param("timeout")) {
+            try { timeout_ms = std::stoi(req.get_param_value("timeout")); } catch (...) {}
+        }
+        if (timeout_ms > 60000) timeout_ms = 60000;
+        if (timeout_ms < 100) timeout_ms = 100;
+
+        // Long-poll: wait for events then return them as JSON
+        // (SSE requires chunked streaming which httplib supports but is complex;
+        //  long-polling is simpler and works well with MCP's request/response model)
+        auto& bus = EventBus::get();
+
+        // First check if there are already events available
+        auto [events, new_seq] = bus.poll(since_seq, 100);
+        if (!events.empty()) {
+            json result;
+            result["events"] = json::array();
+            for (const auto& evt : events) {
+                result["events"].push_back(json{
+                    {"seq", evt.seq},
+                    {"type", evt.type},
+                    {"data", evt.data}
+                });
+            }
+            result["seq"] = new_seq;
+            result["count"] = events.size();
+            res.status = 200;
+            res.set_content(result.dump(2), "application/json");
+            return;
+        }
+
+        // Wait for new events
+        bus.wait_for_events(since_seq, timeout_ms);
+
+        // Poll again after waiting
+        auto [events2, new_seq2] = bus.poll(since_seq, 100);
+        json result;
+        result["events"] = json::array();
+        for (const auto& evt : events2) {
+            result["events"].push_back(json{
+                {"seq", evt.seq},
+                {"type", evt.type},
+                {"data", evt.data}
+            });
+        }
+        result["seq"] = new_seq2;
+        result["count"] = events2.size();
+        res.status = 200;
+        res.set_content(result.dump(2), "application/json");
     });
 
     // DELETE /api/lua/scripts/delete — Delete a script file

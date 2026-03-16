@@ -3,6 +3,8 @@
 #include "../json_helpers.h"
 #include "../pipe_server.h"
 #include "../routes/status_routes.h"
+#include "../lua/lua_engine.h"
+#include "../event_bus.h"
 
 #include <nlohmann/json.hpp>
 #include <uevr/API.hpp>
@@ -15,7 +17,7 @@ PropertyWatch& PropertyWatch::get() {
     return instance;
 }
 
-json PropertyWatch::add_watch(uintptr_t address, const std::string& field_name, int interval_ticks) {
+json PropertyWatch::add_watch(uintptr_t address, const std::string& field_name, int interval_ticks, const std::string& lua_script) {
     auto obj = reinterpret_cast<API::UObject*>(address);
     if (!API::UObjectHook::exists(obj)) {
         return json{{"error", "Object not found or no longer valid"}};
@@ -53,19 +55,22 @@ json PropertyWatch::add_watch(uintptr_t address, const std::string& field_name, 
     entry.current_value = initial_value;
     entry.change_count = 0;
     entry.active = true;
+    entry.lua_script = lua_script;
 
     m_watches[id] = std::move(entry);
 
     PipeServer::get().log("Watch: added watch #" + std::to_string(id) + " on " +
                           JsonHelpers::address_to_string(address) + "." + field_name);
 
-    return json{
+    json result = {
         {"watchId", id},
         {"address", JsonHelpers::address_to_string(address)},
         {"fieldName", field_name},
         {"intervalTicks", interval_ticks},
         {"initialValue", initial_value}
     };
+    if (!lua_script.empty()) result["hasScript"] = true;
+    return result;
 }
 
 json PropertyWatch::remove_watch(int watch_id) {
@@ -365,9 +370,33 @@ void PropertyWatch::tick(uint64_t current_tick) {
             evt.old_value = watch.previous_value;
             evt.new_value = watch.current_value;
 
-            m_changes.push_back(std::move(evt));
+            m_changes.push_back(evt);
             if (static_cast<int>(m_changes.size()) > MAX_CHANGES) {
                 m_changes.pop_front();
+            }
+
+            // Publish event to EventBus
+            EventBus::get().publish("watch_change", json{
+                {"watchId", watch.id},
+                {"fieldName", watch.field_name},
+                {"address", JsonHelpers::address_to_string(watch.address)},
+                {"oldValue", watch.previous_value},
+                {"newValue", watch.current_value},
+                {"changeCount", watch.change_count}
+            });
+
+            // Execute Lua trigger if present
+            if (!watch.lua_script.empty()) {
+                json context = {
+                    {"watch_id", watch.id},
+                    {"address", JsonHelpers::address_to_string(watch.address)},
+                    {"field_name", watch.field_name},
+                    {"old_value", watch.previous_value.dump()},
+                    {"new_value", watch.current_value.dump()},
+                    {"change_count", watch.change_count}
+                };
+                // Fire and forget — don't block the tick
+                LuaEngine::get().execute_callback(watch.lua_script, context);
             }
         }
     }

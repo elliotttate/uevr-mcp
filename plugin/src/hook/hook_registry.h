@@ -9,7 +9,9 @@
 enum class HookAction {
     Log,        // Log all calls to ring buffer
     Block,      // Skip the original function execution
-    LogAndBlock // Both
+    LogAndBlock, // Both
+    Lua,        // Execute Lua callback script (return true/false to allow/block)
+    LuaBlock    // Execute Lua callback script, always block
 };
 
 struct HookCallLog {
@@ -24,6 +26,7 @@ struct HookEntry {
     std::string class_name;
     std::string function_name;
     HookAction action;
+    std::string lua_script; // Lua code to execute when action is Lua/LuaBlock
     uevr::API::UFunction* function{nullptr};
     int call_count{0};
     std::deque<HookCallLog> call_log; // Ring buffer, max 100
@@ -35,7 +38,7 @@ class HookRegistry {
 public:
     static HookRegistry& get();
 
-    nlohmann::json add_hook(const std::string& class_name, const std::string& function_name, HookAction action);
+    nlohmann::json add_hook(const std::string& class_name, const std::string& function_name, HookAction action, const std::string& lua_script = "");
     nlohmann::json remove_hook(int hook_id);
     nlohmann::json list_hooks();
     nlohmann::json get_hook_log(int hook_id, int max_entries = 50);

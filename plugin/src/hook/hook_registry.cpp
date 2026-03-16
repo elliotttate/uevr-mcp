@@ -2,6 +2,8 @@
 #include "../json_helpers.h"
 #include "../pipe_server.h"
 #include "../routes/status_routes.h"
+#include "../lua/lua_engine.h"
+#include "../event_bus.h"
 
 using json = nlohmann::json;
 
@@ -25,6 +27,8 @@ static std::string action_to_string(HookAction action) {
         case HookAction::Log:        return "log";
         case HookAction::Block:      return "block";
         case HookAction::LogAndBlock: return "log_and_block";
+        case HookAction::Lua:        return "lua";
+        case HookAction::LuaBlock:   return "lua_block";
     }
     return "unknown";
 }
@@ -32,10 +36,12 @@ static std::string action_to_string(HookAction action) {
 static HookAction string_to_action(const std::string& s) {
     if (s == "block")         return HookAction::Block;
     if (s == "log_and_block") return HookAction::LogAndBlock;
+    if (s == "lua")           return HookAction::Lua;
+    if (s == "lua_block")     return HookAction::LuaBlock;
     return HookAction::Log; // default
 }
 
-json HookRegistry::add_hook(const std::string& class_name, const std::string& function_name, HookAction action) {
+json HookRegistry::add_hook(const std::string& class_name, const std::string& function_name, HookAction action, const std::string& lua_script) {
     auto& api = uevr::API::get();
     if (!api) {
         return json{{"error", "API not available"}};
@@ -86,6 +92,11 @@ json HookRegistry::add_hook(const std::string& class_name, const std::string& fu
         }
     }
 
+    // Validate Lua actions have a script
+    if ((action == HookAction::Lua || action == HookAction::LuaBlock) && lua_script.empty()) {
+        return json{{"error", "Lua hook actions require a 'script' parameter"}};
+    }
+
     // Install the hook via UEVR's hook_ptr
     // UEVR supports multiple hooks on the same function, so this is safe even if
     // something else has already hooked it.
@@ -103,6 +114,7 @@ json HookRegistry::add_hook(const std::string& class_name, const std::string& fu
     entry.class_name = class_name;
     entry.function_name = function_name;
     entry.action = action;
+    entry.lua_script = lua_script;
     entry.function = func;
     entry.call_count = 0;
     entry.active = true;
@@ -157,7 +169,7 @@ json HookRegistry::list_hooks() {
 
     json hooks_arr = json::array();
     for (const auto& [id, entry] : m_hooks) {
-        hooks_arr.push_back(json{
+        json h = {
             {"id", entry.id},
             {"className", entry.class_name},
             {"functionName", entry.function_name},
@@ -165,7 +177,11 @@ json HookRegistry::list_hooks() {
             {"callCount", entry.call_count},
             {"active", entry.active},
             {"logSize", (int)entry.call_log.size()}
-        });
+        };
+        if (!entry.lua_script.empty()) {
+            h["hasScript"] = true;
+        }
+        hooks_arr.push_back(std::move(h));
     }
 
     return json{
@@ -254,32 +270,82 @@ bool HookRegistry::on_pre_hook(uevr::API::UFunction* fn, uevr::API::UObject* obj
     auto& entry = hook_it->second;
     entry.call_count++;
 
+    // Get object info (shared by all action types)
+    std::string obj_name = "<null>";
+    uintptr_t obj_addr = 0;
+    if (obj) {
+        obj_addr = reinterpret_cast<uintptr_t>(obj);
+        auto fname = obj->get_fname();
+        if (fname) {
+            obj_name = JsonHelpers::wide_to_utf8(fname->to_string());
+        } else {
+            obj_name = "<unnamed>";
+        }
+    }
+
     // Log the call if action includes logging
     if (entry.action == HookAction::Log || entry.action == HookAction::LogAndBlock) {
         HookCallLog log_entry;
         log_entry.tick = StatusRoutes::get_tick_count();
-        log_entry.object_address = reinterpret_cast<uintptr_t>(obj);
+        log_entry.object_address = obj_addr;
         log_entry.function_name = entry.function_name;
+        log_entry.object_name = obj_name;
 
-        // Get object name - be careful, this runs on game thread during process_event
-        // so we keep it lightweight
-        if (obj) {
-            auto fname = obj->get_fname();
-            if (fname) {
-                auto wname = fname->to_string();
-                log_entry.object_name = JsonHelpers::wide_to_utf8(wname);
-            } else {
-                log_entry.object_name = "<unnamed>";
-            }
-        } else {
-            log_entry.object_name = "<null>";
-        }
-
-        // Push to ring buffer, cap at MAX_LOG
         entry.call_log.push_back(std::move(log_entry));
         while ((int)entry.call_log.size() > HookEntry::MAX_LOG) {
             entry.call_log.pop_front();
         }
+    }
+
+    // Execute Lua callback if action is Lua/LuaBlock
+    if (entry.action == HookAction::Lua || entry.action == HookAction::LuaBlock) {
+        // Log the call too
+        HookCallLog log_entry;
+        log_entry.tick = StatusRoutes::get_tick_count();
+        log_entry.object_address = obj_addr;
+        log_entry.function_name = entry.function_name;
+        log_entry.object_name = obj_name;
+        entry.call_log.push_back(std::move(log_entry));
+        while ((int)entry.call_log.size() > HookEntry::MAX_LOG) {
+            entry.call_log.pop_front();
+        }
+
+        // Publish event
+        EventBus::get().publish("hook_fire", json{
+            {"hookId", entry.id},
+            {"className", entry.class_name},
+            {"functionName", entry.function_name},
+            {"objectAddress", JsonHelpers::address_to_string(obj_addr)},
+            {"objectName", obj_name}
+        });
+
+        // Execute the Lua script with context
+        // Must release our lock first to avoid deadlock with LuaEngine
+        std::string script = entry.lua_script;
+        bool is_lua_block = (entry.action == HookAction::LuaBlock);
+        lock.unlock();
+
+        json context = {
+            {"object_address", JsonHelpers::address_to_string(obj_addr)},
+            {"object_name", obj_name},
+            {"function_name", entry.function_name},
+            {"class_name", entry.class_name},
+            {"hook_id", entry.id},
+            {"call_count", entry.call_count}
+        };
+
+        auto lua_result = LuaEngine::get().execute_callback(script, context);
+
+        if (is_lua_block) {
+            return false; // Always block
+        }
+
+        // For "lua" action, script return value controls blocking
+        // Return false (block) if script returns false; otherwise allow
+        if (lua_result.contains("result") && lua_result["result"].is_boolean()) {
+            return lua_result["result"].get<bool>();
+        }
+        return true; // Default: allow execution
     }
 
     // Block the original function if action includes blocking

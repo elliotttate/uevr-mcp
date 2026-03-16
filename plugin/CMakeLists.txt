@@ -80,6 +80,8 @@ add_library(uevr_mcp SHARED
     src/screenshot/screenshot_capture.cpp
     src/watch/property_watch.cpp
     src/hook/hook_registry.cpp
+    src/event_bus.cpp
+    src/routes/discovery_routes.cpp
 )
 
 target_include_directories(uevr_mcp PRIVATE

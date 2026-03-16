@@ -415,4 +415,106 @@ public class HttpContractTests
         var method = GetTool("uevr_list_spawned");
         Assert.Empty(method.GetParameters());
     }
+
+    // ── Lua Reload ──
+
+    [Fact]
+    public void LuaReload_RequiresFilename()
+    {
+        var method = GetTool("uevr_lua_reload");
+        var ps = method.GetParameters();
+        Assert.True(ps.Length >= 1);
+        Assert.Equal("filename", ps[0].Name);
+        Assert.False(ps[0].HasDefaultValue);
+    }
+
+    [Fact]
+    public void LuaReload_AutorunIsOptional()
+    {
+        var method = GetTool("uevr_lua_reload");
+        var ps = method.GetParameters();
+        var autorun = ps.FirstOrDefault(p => p.Name == "autorun");
+        Assert.NotNull(autorun);
+        Assert.True(autorun.HasDefaultValue);
+        Assert.Equal(false, autorun.DefaultValue);
+    }
+
+    // ── Lua Globals ──
+
+    [Fact]
+    public void LuaGlobals_NoParams()
+    {
+        var method = GetTool("uevr_lua_globals");
+        Assert.Empty(method.GetParameters());
+    }
+
+    // ── Hook Add with Script ──
+
+    [Fact]
+    public void HookAdd_HasScriptParam()
+    {
+        var method = GetTool("uevr_hook_add");
+        var ps = method.GetParameters();
+        var script = ps.FirstOrDefault(p => p.Name == "script");
+        Assert.NotNull(script);
+        Assert.True(script.HasDefaultValue);
+    }
+
+    [Fact]
+    public void HookAdd_ActionDescriptionMentionsLua()
+    {
+        var method = GetTool("uevr_hook_add");
+        var desc = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("lua", desc.ToLower());
+    }
+
+    // ── Watch Add with Script ──
+
+    [Fact]
+    public void WatchAdd_HasScriptParam()
+    {
+        var method = GetTool("uevr_watch_add");
+        var ps = method.GetParameters();
+        var script = ps.FirstOrDefault(p => p.Name == "script");
+        Assert.NotNull(script);
+        Assert.True(script.HasDefaultValue);
+    }
+
+    // ── Events Poll ──
+
+    [Fact]
+    public void EventsPoll_AllParamsOptional()
+    {
+        var method = GetTool("uevr_events_poll");
+        var ps = method.GetParameters();
+        foreach (var p in ps)
+            Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
+    }
+
+    [Fact]
+    public void EventsPoll_HasSinceAndTimeout()
+    {
+        var method = GetTool("uevr_events_poll");
+        var ps = method.GetParameters();
+        Assert.NotNull(ps.FirstOrDefault(p => p.Name == "since"));
+        Assert.NotNull(ps.FirstOrDefault(p => p.Name == "timeout"));
+    }
+
+    // ── Macro descriptions updated ──
+
+    [Fact]
+    public void MacroPlay_DescriptionMentionsStateRef()
+    {
+        var method = GetTool("uevr_macro_play");
+        var desc = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("$result", desc);
+    }
+
+    [Fact]
+    public void MacroSave_DescriptionMentionsPersistence()
+    {
+        var method = GetTool("uevr_macro_save");
+        var desc = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("persist", desc.ToLower());
+    }
 }

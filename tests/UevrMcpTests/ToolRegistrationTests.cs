@@ -43,8 +43,9 @@ public class ToolRegistrationTests
         "uevr_get_camera",
         "uevr_get_game_info",
         "uevr_set_position", "uevr_set_health",
-        // Lua tools (7)
+        // Lua tools (9)
         "uevr_lua_exec", "uevr_lua_reset", "uevr_lua_state",
+        "uevr_lua_reload", "uevr_lua_globals",
         "uevr_lua_write_script", "uevr_lua_list_scripts", "uevr_lua_read_script", "uevr_lua_delete_script",
         // Blueprint tools (7)
         "uevr_spawn_object", "uevr_add_component", "uevr_get_cdo", "uevr_write_cdo",
@@ -78,7 +79,12 @@ public class ToolRegistrationTests
         "uevr_hook_log", "uevr_hook_clear",
         // Macro tools (5)
         "uevr_macro_save", "uevr_macro_play", "uevr_macro_list",
-        "uevr_macro_delete", "uevr_macro_get"
+        "uevr_macro_delete", "uevr_macro_get",
+        // Event streaming (1)
+        "uevr_events_poll",
+        // Discovery tools (6)
+        "uevr_subclasses", "uevr_search_names", "uevr_delegates",
+        "uevr_vtable", "uevr_pattern_scan", "uevr_all_children"
     };
 
     static List<(string Name, MethodInfo Method)> DiscoverTools()
@@ -109,10 +115,10 @@ public class ToolRegistrationTests
     }
 
     [Fact]
-    public void TotalToolCount_Is103()
+    public void TotalToolCount_Is112()
     {
         var tools = DiscoverTools();
-        Assert.Equal(103, tools.Count);
+        Assert.Equal(112, tools.Count);
     }
 
     [Fact]

@@ -48,13 +48,14 @@ void register_routes(httplib::Server& server) {
         }
 
         auto action = parse_action(action_str);
+        auto script = body.value("script", "");
 
         PipeServer::get().log("Hook: adding hook on " + class_name + "::" + function_name +
                               " action=" + action_str);
 
         // add_hook accesses UE objects (find_uobject, find_function), so it must run on game thread
-        auto result = GameThreadQueue::get().submit_and_wait([class_name, function_name, action]() {
-            return HookRegistry::get().add_hook(class_name, function_name, action);
+        auto result = GameThreadQueue::get().submit_and_wait([class_name, function_name, action, script]() {
+            return HookRegistry::get().add_hook(class_name, function_name, action, script);
         });
 
         send_json(res, result);

@@ -17,6 +17,7 @@ struct WatchEntry {
     nlohmann::json current_value;
     int change_count{0};
     bool active{true};
+    std::string lua_script; // Optional Lua code to execute on change
 };
 
 struct ChangeEvent {
@@ -41,7 +42,7 @@ public:
     static PropertyWatch& get();
 
     // Watch management
-    nlohmann::json add_watch(uintptr_t address, const std::string& field_name, int interval_ticks = 1);
+    nlohmann::json add_watch(uintptr_t address, const std::string& field_name, int interval_ticks = 1, const std::string& lua_script = "");
     nlohmann::json remove_watch(int watch_id);
     nlohmann::json list_watches();
     nlohmann::json get_changes(int max_count = 100);

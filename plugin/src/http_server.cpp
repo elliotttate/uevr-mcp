@@ -19,6 +19,7 @@
 #include "routes/asset_routes.h"
 #include "routes/hook_routes.h"
 #include "routes/macro_routes.h"
+#include "routes/discovery_routes.h"
 
 #include <uevr/API.hpp>
 #include <filesystem>
@@ -107,6 +108,7 @@ void HttpServer::register_routes() {
     AssetRoutes::register_routes(*m_server);
     HookRoutes::register_routes(*m_server);
     MacroRoutes::register_routes(*m_server);
+    DiscoveryRoutes::register_routes(*m_server);
 }
 
 void HttpServer::server_thread_func() {

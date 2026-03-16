@@ -41,11 +41,12 @@ void register_routes(httplib::Server& server) {
         }
 
         int interval = body.value("interval", 1);
+        auto script = body.value("script", "");
 
         PipeServer::get().log("Watch: add watch on " + addr_str + "." + field_name);
 
-        auto result = GameThreadQueue::get().submit_and_wait([address, field_name, interval]() {
-            return PropertyWatch::get().add_watch(address, field_name, interval);
+        auto result = GameThreadQueue::get().submit_and_wait([address, field_name, interval, script]() {
+            return PropertyWatch::get().add_watch(address, field_name, interval, script);
         });
         send_json(res, result);
     });

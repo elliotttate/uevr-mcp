@@ -5,10 +5,11 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that g
 - **Inspect everything.** Every UObject, every field, every UFunction — searchable and navigable from a running game. Call any method, chain multi-step queries across the object graph, batch operations in a single tick.
 - **Read and write live state.** Player health, enemy AI, physics, materials, animations, transforms — the agent sees what the game sees, in real time.
 - **Full VR control.** HMD and controller poses, haptic feedback, snap turn, aim method, motion controller attachment — complete VR subsystem access.
-- **Live Lua scripting.** Execute Lua code in the game process with persistent state, frame callbacks, and timers. Write and deploy scripts to the UEVR autorun folder.
+- **Live Lua scripting.** Execute Lua code in the game process with persistent state, frame callbacks, timers, async coroutines, and a module system. Hot-reload scripts without losing state. Write and deploy scripts to the UEVR autorun folder.
 - **Screenshot from the GPU.** Capture the game's D3D11 backbuffer as JPEG — works even when the game window is behind other windows.
-- **Reverse-engineer anything.** Snapshot an object's state, perform an action, diff to see what changed. Hook any UFunction to log calls or block execution. Watch properties for real-time change detection.
-- **Works across games.** Same 103 tools work on any Unreal Engine game that UEVR supports.
+- **Reverse-engineer anything.** Snapshot an object's state, perform an action, diff to see what changed. Hook any UFunction to log calls, block execution, or run Lua callbacks with argument inspection. Watch properties with Lua triggers for reactive scripting.
+- **Real-time event streaming.** Poll for hook fires, watch changes, and Lua output in real time via long-polling.
+- **Works across games.** Same 106 tools work on any Unreal Engine game that UEVR supports.
 
 ## Setup
 
@@ -26,7 +27,13 @@ cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-Copy `build/Release/uevr_mcp.dll` into your UEVR plugins directory for the target game.
+Copy `build/Release/uevr_mcp.dll` into your UEVR plugins directory for the target game:
+
+```
+%APPDATA%\UnrealVRMod\<GameExeName>\plugins\uevr_mcp.dll
+```
+
+For example: `%APPDATA%\UnrealVRMod\MyGame-Win64-Shipping\plugins\uevr_mcp.dll`
 
 ### 2. Connect an MCP client
 
@@ -92,11 +99,11 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
   +-----------------+
 ```
 
-**`plugin/`** — A C++ DLL loaded by UEVR inside the game. Embeds Lua 5.4 + Sol2, cpp-httplib, nlohmann/json. Starts an HTTP server on `localhost:8899` exposing 90+ REST endpoints. Hooks into the engine tick, D3D present, and XInput callbacks.
+**`plugin/`** — A C++ DLL loaded by UEVR inside the game. Embeds Lua 5.4 + Sol2, cpp-httplib, nlohmann/json. Starts an HTTP server on `localhost:8899` exposing 104 REST endpoints. Hooks into the engine tick, D3D present, and XInput callbacks. HTTP handler threads submit work to the game thread via a `GameThreadQueue` (std::promise/future, up to 16 items per tick, 5s timeout) to safely access UE internals. A named pipe (`\\.\pipe\UEVR_MCP`) provides a secondary channel for status and log operations that work even before the HTTP server is ready.
 
-**`mcp-server/`** — A standalone .NET console app that speaks MCP over stdio. Translates tool calls into HTTP requests. Also has a named pipe channel for status/log operations that work even if HTTP hasn't started yet.
+**`mcp-server/`** — A standalone .NET console app that speaks MCP over stdio. Translates tool calls into HTTP requests, falling back to the named pipe for status/log/game-info when HTTP is unavailable.
 
-## 103 MCP Tools
+## 106 MCP Tools
 
 ### Object Exploration (12 tools)
 
@@ -162,13 +169,15 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 | `uevr_save_config` | Save UEVR config to disk |
 | `uevr_reload_config` | Reload UEVR config from disk |
 
-### Lua Scripting (7 tools)
+### Lua Scripting (9 tools)
 
 | Tool | Description |
 |------|-------------|
-| `uevr_lua_exec` | Execute Lua with full UEVR API access. Persistent state, frame callbacks, timers. |
+| `uevr_lua_exec` | Execute Lua with full UEVR API access. Persistent state, frame callbacks, timers, async coroutines, module system. |
 | `uevr_lua_reset` | Destroy and recreate the Lua state |
-| `uevr_lua_state` | Diagnostics: exec count, callback count, timer count, memory |
+| `uevr_lua_state` | Diagnostics: exec count, callback count, timer count, coroutine count, memory |
+| `uevr_lua_reload` | Hot-reload a script file without losing state (preserves globals, callbacks, timers) |
+| `uevr_lua_globals` | Inspect top-level Lua global variables — names, types, values |
 | `uevr_lua_write_script` | Write a .lua file to UEVR scripts dir (with autorun option) |
 | `uevr_lua_list_scripts` | List script files |
 | `uevr_lua_read_script` | Read script content |
@@ -271,7 +280,7 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 
 | Tool | Description |
 |------|-------------|
-| `uevr_hook_add` | Hook any UFunction — log calls, block execution, or both |
+| `uevr_hook_add` | Hook any UFunction — log, block, or run Lua callbacks. Lua hooks receive context (object, function, args) and can conditionally block. |
 | `uevr_hook_remove` | Remove a hook |
 | `uevr_hook_list` | List all hooks with call counts |
 | `uevr_hook_log` | Get the call log for a hook — who called what and when |
@@ -281,11 +290,17 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 
 | Tool | Description |
 |------|-------------|
-| `uevr_macro_save` | Save a named operation sequence with $param placeholders |
-| `uevr_macro_play` | Execute a macro with parameter substitution |
+| `uevr_macro_save` | Save a named operation sequence with $param placeholders. Persists to disk. |
+| `uevr_macro_play` | Execute a macro with parameter substitution and state propagation ($result[N].field references) |
 | `uevr_macro_list` | List saved macros |
 | `uevr_macro_delete` | Delete a macro |
 | `uevr_macro_get` | Get a macro's full definition |
+
+### Event Streaming (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `uevr_events_poll` | Long-poll for real-time events (hook fires, watch changes, Lua output) |
 
 ### System (4 tools)
 
@@ -362,6 +377,19 @@ end, false)  -- false = one-shot
 mcp.set_timer(1.0, function()
     mcp.log("Tick!")
 end, true)  -- true = repeating
+
+-- Async coroutines with mcp.wait()
+mcp.async(function()
+    mcp.log("Starting patrol...")
+    mcp.wait(2.0)  -- resume after 2 seconds
+    mcp.log("Moving to waypoint...")
+    mcp.wait_until(function() return get_health() < 50 end)
+    mcp.log("Health dropped below 50!")
+end)
+
+-- Module system (require)
+local utils = require("my_utils")  -- loads scripts/my_utils.lua
+utils.do_something()
 ```
 
 ### Spatial reasoning
@@ -396,9 +424,31 @@ uevr_macro_play("kill_actor", {target: "0x12345678"})
 
 ## HTTP API
 
-All 91 endpoints are accessible directly via HTTP at `http://localhost:8899/api`. Call `GET /api` for the full endpoint index. The MCP server is a thin wrapper — you can also use curl, a browser, or any HTTP client.
+All 104 endpoints are accessible directly via HTTP at `http://localhost:8899/api`. Call `GET /api` for the full endpoint index. The MCP server is a thin wrapper — you can also use curl, a browser, or any HTTP client.
 
 The web dashboard (if present in a `web/` folder next to the DLL) is served at `http://localhost:8899/`.
+
+## Testing
+
+### Unit tests (no game required)
+
+The C# unit tests verify tool registration, parameter signatures, and HTTP contract correctness via reflection — no running game needed.
+
+```bash
+cd tests/UevrMcpTests
+dotnet test
+```
+
+### Integration tests (live game required)
+
+The Python integration tests hit the plugin's HTTP API against a running game. Install dependencies and run with pytest:
+
+```bash
+pip install pytest requests
+pytest tests/integration/ -v
+```
+
+The tests use `http://localhost:8899` by default. Set `UEVR_MCP_API_URL` to override. Tests that require a game connection are marked with the `require_game` fixture and will skip if the plugin isn't reachable.
 
 ## Supported games
 

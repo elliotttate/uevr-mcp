@@ -57,7 +57,9 @@ void register_routes(httplib::Server& server) {
             "/api/vr/recenter", "/api/vr/haptics", "/api/vr/config/save", "/api/vr/config/reload",
             "/api/player", "/api/player/position", "/api/player/health",
             "/api/lua/exec", "/api/lua/reset", "/api/lua/state",
+            "/api/lua/reload", "/api/lua/globals",
             "/api/lua/scripts/write", "/api/lua/scripts/list", "/api/lua/scripts/read", "/api/lua/scripts/delete",
+            "/api/events",
             "/api/blueprint/spawn", "/api/blueprint/add_component",
             "/api/blueprint/cdo", "/api/blueprint/destroy",
             "/api/blueprint/set_transform", "/api/blueprint/spawned",
@@ -80,7 +82,10 @@ void register_routes(httplib::Server& server) {
             "/api/hook/add", "/api/hook/remove", "/api/hook/list",
             "/api/hook/log", "/api/hook/clear",
             "/api/macro/save", "/api/macro/play", "/api/macro/list",
-            "/api/macro/delete", "/api/macro/get"
+            "/api/macro/delete", "/api/macro/get",
+            "/api/discovery/subclasses", "/api/discovery/names",
+            "/api/discovery/delegates", "/api/discovery/vtable",
+            "/api/discovery/pattern_scan", "/api/discovery/all_children"
         });
 
         res.set_content(result.dump(2), "application/json");

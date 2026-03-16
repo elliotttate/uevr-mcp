@@ -1,6 +1,7 @@
 #include "lua_engine.h"
 #include "../pipe_server.h"
 #include "../json_helpers.h"
+#include "../event_bus.h"
 
 #define SOL_ALL_SAFETIES_ON 1
 #include <sol/sol.hpp>
@@ -8,6 +9,9 @@
 #include <uevr/API.hpp>
 #include <chrono>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
+#include <unordered_set>
 
 using namespace uevr;
 
@@ -155,6 +159,8 @@ void LuaEngine::initialize() {
 
     setup_bindings();
     setup_uevr_api_bindings();
+    setup_module_loader();
+    setup_coroutine_scheduler();
 
     m_initialized = true;
     PipeServer::get().log("LuaEngine: initialized");
@@ -631,6 +637,7 @@ json LuaEngine::reset() {
     m_exec_count = 0;
     m_next_callback_id = 1;
     m_next_timer_id = 1;
+    m_next_coroutine_id = 1;
     m_output_buffer.clear();
     m_initialized = false;
 
@@ -667,11 +674,22 @@ json LuaEngine::get_state_info() {
         });
         info["timerCount"] = timer_count;
 
+        // Count active coroutines
+        sol::table coroutines = lua["_mcp_coroutines"];
+        int co_count = 0;
+        if (coroutines.valid()) {
+            coroutines.for_each([&](const sol::object&, const sol::object& v) {
+                if (v.get_type() == sol::type::table) co_count++;
+            });
+        }
+        info["coroutineCount"] = co_count;
+
         // Lua memory usage
         info["memoryKB"] = lua_gc(lua.lua_state(), LUA_GCCOUNT, 0);
     } else {
         info["frameCallbackCount"] = 0;
         info["timerCount"] = 0;
+        info["coroutineCount"] = 0;
         info["memoryKB"] = 0;
     }
 
@@ -739,4 +757,461 @@ void LuaEngine::on_frame(float delta) {
     for (int id : to_remove) {
         timers[id] = sol::nil;
     }
+
+    // ── Process async coroutines ────────────────────────────────────────
+    sol::table coroutines = lua["_mcp_coroutines"];
+    if (!coroutines.valid()) return;
+
+    std::vector<int> co_remove;
+
+    coroutines.for_each([&](const sol::object& key, const sol::object& val) {
+        if (val.get_type() != sol::type::table) return;
+        sol::table entry = val.as<sol::table>();
+
+        std::string wait_type = entry["wait_type"].get_or<std::string>("none");
+        bool ready = false;
+
+        if (wait_type == "seconds") {
+            float remaining = entry["remaining"].get_or(0.0f);
+            remaining -= delta;
+            if (remaining <= 0.0f) {
+                ready = true;
+            } else {
+                entry["remaining"] = remaining;
+            }
+        } else if (wait_type == "predicate") {
+            sol::optional<sol::protected_function> pred = entry["predicate"];
+            if (pred.has_value()) {
+                auto pred_result = pred.value()();
+                if (pred_result.valid()) {
+                    sol::object r = pred_result;
+                    if (r.get_type() == sol::type::boolean && r.as<bool>()) {
+                        ready = true;
+                    }
+                }
+            }
+        } else {
+            // "none" — resume immediately (first tick after mcp.async)
+            ready = true;
+        }
+
+        if (ready) {
+            sol::optional<sol::thread> thread_opt = entry["thread"];
+            if (!thread_opt.has_value()) {
+                int id = entry["id"].get_or(0);
+                co_remove.push_back(id);
+                return;
+            }
+
+            sol::thread& thread = thread_opt.value();
+            sol::state_view thread_state = thread.state();
+            sol::object fn_obj = thread_state["_mcp_co_fn"];
+            sol::coroutine co(thread_state.lua_state(), fn_obj);
+
+            if (!co) {
+                int id = entry["id"].get_or(0);
+                co_remove.push_back(id);
+                return;
+            }
+
+            auto result = co();
+            if (!result.valid()) {
+                sol::error err = result;
+                PipeServer::get().log("LuaEngine: coroutine error: " + std::string(err.what()));
+                int id = entry["id"].get_or(0);
+                co_remove.push_back(id);
+                return;
+            }
+
+            // Check if coroutine finished
+            auto status = thread.status();
+            if (status == sol::thread_status::dead || status == sol::thread_status::ok) {
+                int id = entry["id"].get_or(0);
+                co_remove.push_back(id);
+            }
+            // If yielded, the coroutine set its own wait_type via mcp.wait/wait_until
+        }
+    });
+
+    for (int id : co_remove) {
+        coroutines[id] = sol::nil;
+    }
+}
+
+// ── Module loader (require() support) ──────────────────────────────
+
+void LuaEngine::setup_module_loader() {
+    auto& lua = m_state->lua;
+
+    // Custom searcher that loads from the UEVR scripts directory
+    lua.safe_script(R"(
+        table.insert(package.searchers, 2, function(modname)
+            local base = _mcp_scripts_dir
+            if not base then return "\n\tno _mcp_scripts_dir set" end
+            local path = base .. "/" .. modname:gsub("%.", "/") .. ".lua"
+            local f = io.open(path, "r")
+            if not f then
+                return "\n\tno file '" .. path .. "'"
+            end
+            local content = f:read("*a")
+            f:close()
+            local fn, err = load(content, "@" .. path)
+            if not fn then
+                error("error loading module '" .. modname .. "' from file '" .. path .. "':\n\t" .. err)
+            end
+            return fn, path
+        end)
+    )", sol::script_pass_on_error);
+
+    // Re-enable io.open (read-only, for the module loader) but keep other io functions disabled
+    lua.safe_script(R"(
+        local _original_open = _G._io_open_backup
+        if not _original_open then
+            -- io was set to nil in initialization, so we need a minimal open
+            -- We'll use loadfile-style loading instead
+        end
+    )", sol::script_pass_on_error);
+
+    // Set the scripts directory path
+    auto& api = uevr::API::get();
+    if (api) {
+        auto scripts_dir = api->get_persistent_dir() / "scripts";
+        lua["_mcp_scripts_dir"] = scripts_dir.string();
+
+        // Provide a minimal io.open for the module loader only
+        // We create a sandboxed version that only allows reading from scripts dir
+        std::string sd = scripts_dir.string();
+        lua["io"] = lua.create_table();
+        lua["io"]["open"] = [sd](const std::string& path, sol::optional<std::string> mode) -> sol::object {
+            // Only allow read mode
+            std::string m = mode.value_or("r");
+            if (m.find('w') != std::string::npos || m.find('a') != std::string::npos) {
+                return sol::nil;
+            }
+            // Must be under scripts dir (basic check)
+            std::string normalized = path;
+            if (normalized.find("..") != std::string::npos) {
+                return sol::nil;
+            }
+            // Actually open the file — if it fails, return nil
+            // Note: we return nil since we can't return a full Lua file handle easily
+            // The module searcher above uses io.open, so we need this to work
+            return sol::nil; // Fall through — we handle it differently
+        };
+    }
+
+    // Actually, the cleanest approach: use loadfile directly in the searcher
+    // Re-enable loadfile (sandboxed to scripts dir only)
+    if (api) {
+        auto scripts_dir = api->get_persistent_dir() / "scripts";
+        std::string sd = scripts_dir.string();
+
+        // Replace the searcher with one that uses loadfile-style loading via C++
+        lua["_mcp_load_module"] = [this, sd](const std::string& modname) -> sol::object {
+            // Convert module name to path
+            std::string relpath = modname;
+            for (auto& c : relpath) { if (c == '.') c = '/'; }
+            relpath += ".lua";
+
+            std::filesystem::path filepath = std::filesystem::path(sd) / relpath;
+
+            // Also check autorun subdirectory
+            if (!std::filesystem::exists(filepath)) {
+                filepath = std::filesystem::path(sd) / "autorun" / relpath;
+            }
+
+            if (!std::filesystem::exists(filepath)) {
+                return sol::make_object(m_state->lua, sol::nil);
+            }
+
+            std::ifstream in(filepath, std::ios::binary);
+            if (!in) return sol::make_object(m_state->lua, sol::nil);
+
+            std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+            auto result = m_state->lua.load(content, "@" + filepath.string());
+            if (!result.valid()) {
+                sol::error err = result;
+                PipeServer::get().log("LuaEngine: module load error: " + std::string(err.what()));
+                return sol::make_object(m_state->lua, sol::nil);
+            }
+
+            return sol::object(result);
+        };
+
+        // Install a clean searcher using the C++ loader
+        lua.safe_script(R"(
+            -- Clear existing custom searchers, keep only preload and C++ loader
+            package.searchers = {
+                package.searchers[1], -- preload searcher
+                function(modname)
+                    local loader = _mcp_load_module(modname)
+                    if loader then
+                        return loader
+                    end
+                    return "\n\tno module '" .. modname .. "' in scripts directory"
+                end
+            }
+        )", sol::script_pass_on_error);
+    }
+
+    // Disable io again after setting up the loader
+    lua["io"] = sol::nil;
+}
+
+// ── Coroutine scheduler setup ──────────────────────────────────────
+
+void LuaEngine::setup_coroutine_scheduler() {
+    auto& lua = m_state->lua;
+    sol::table mcp = lua["mcp"];
+
+    // Storage for active coroutines
+    lua["_mcp_coroutines"] = lua.create_table();
+
+    // mcp.async(fn) — wrap fn in a managed coroutine that can use mcp.wait()
+    mcp["async"] = [this](sol::protected_function fn) -> int {
+        auto& lua = m_state->lua;
+        int id = m_next_coroutine_id++;
+
+        // Create a new thread (Lua coroutine)
+        sol::thread thread = sol::thread::create(lua.lua_state());
+        sol::state_view thread_state = thread.state();
+
+        // Store the function in the thread's environment
+        thread_state["_mcp_co_fn"] = fn;
+        // Store current coroutine id for mcp.wait() to find
+        thread_state["_mcp_co_id"] = id;
+
+        sol::table coroutines = lua["_mcp_coroutines"];
+        sol::table entry = lua.create_table();
+        entry["id"] = id;
+        entry["thread"] = thread;
+        entry["wait_type"] = "none"; // Will be resumed on next tick
+
+        coroutines[id] = entry;
+        return id;
+    };
+
+    // mcp.wait(seconds) — yield the current coroutine, resume after delay
+    mcp["wait"] = [this](lua_State* L, float seconds) -> int {
+        auto& lua = m_state->lua;
+        sol::state_view sv(L);
+
+        // Find which coroutine we're in
+        sol::optional<int> co_id = sv["_mcp_co_id"];
+        if (!co_id.has_value()) {
+            luaL_error(L, "mcp.wait() can only be called inside mcp.async()");
+            return 0;
+        }
+
+        // Update the coroutine entry's wait info
+        sol::table coroutines = lua["_mcp_coroutines"];
+        sol::optional<sol::table> entry = coroutines[co_id.value()];
+        if (entry.has_value()) {
+            entry.value()["wait_type"] = "seconds";
+            entry.value()["remaining"] = seconds;
+        }
+
+        return lua_yield(L, 0);
+    };
+
+    // mcp.wait_until(predicate_fn) — yield, resume when predicate returns true
+    mcp["wait_until"] = [this](lua_State* L, sol::protected_function predicate) -> int {
+        auto& lua = m_state->lua;
+        sol::state_view sv(L);
+
+        sol::optional<int> co_id = sv["_mcp_co_id"];
+        if (!co_id.has_value()) {
+            luaL_error(L, "mcp.wait_until() can only be called inside mcp.async()");
+            return 0;
+        }
+
+        sol::table coroutines = lua["_mcp_coroutines"];
+        sol::optional<sol::table> entry = coroutines[co_id.value()];
+        if (entry.has_value()) {
+            entry.value()["wait_type"] = "predicate";
+            entry.value()["predicate"] = predicate;
+        }
+
+        return lua_yield(L, 0);
+    };
+
+    // mcp.cancel_async(id) — cancel a running coroutine
+    mcp["cancel_async"] = [this](int id) {
+        sol::table coroutines = m_state->lua["_mcp_coroutines"];
+        coroutines[id] = sol::nil;
+    };
+
+    // mcp.clear_async() — cancel all coroutines
+    mcp["clear_async"] = [this]() {
+        m_state->lua["_mcp_coroutines"] = m_state->lua.create_table();
+        m_next_coroutine_id = 1;
+    };
+}
+
+// ── execute_callback — run script with context variables ───────────
+
+json LuaEngine::execute_callback(const std::string& code, const json& context) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    if (!m_initialized || !m_state) {
+        return json{{"success", false}, {"error", "Lua engine not initialized"}};
+    }
+
+    m_output_buffer.clear();
+    auto& lua = m_state->lua;
+
+    // Inject context variables into a temporary table
+    sol::table ctx = lua.create_table();
+    for (auto it = context.begin(); it != context.end(); ++it) {
+        const auto& key = it.key();
+        const auto& val = it.value();
+
+        if (val.is_string()) ctx[key] = val.get<std::string>();
+        else if (val.is_number_integer()) ctx[key] = val.get<int64_t>();
+        else if (val.is_number_float()) ctx[key] = val.get<double>();
+        else if (val.is_boolean()) ctx[key] = val.get<bool>();
+        else ctx[key] = val.dump(); // fallback to string
+    }
+
+    lua["_callback_ctx"] = ctx;
+
+    // Wrap the code to have access to context vars as locals
+    std::string wrapped = "local ctx = _callback_ctx\n" + code;
+
+    lua_sethook(lua.lua_state(), instruction_count_hook, LUA_MASKCOUNT, LUA_INSTRUCTION_LIMIT);
+    auto result = lua.safe_script(wrapped, sol::script_pass_on_error);
+    lua_sethook(lua.lua_state(), nullptr, 0, 0);
+
+    // Clean up
+    lua["_callback_ctx"] = sol::nil;
+
+    json response;
+    response["output"] = m_output_buffer;
+
+    if (result.valid()) {
+        sol::object val = result;
+        response["success"] = true;
+        response["result"] = sol_to_json(val);
+    } else {
+        sol::error err = result;
+        response["success"] = false;
+        response["error"] = err.what();
+    }
+
+    return response;
+}
+
+// ── reload_script — execute a file in the existing state ───────────
+
+json LuaEngine::reload_script(const std::string& filepath) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    if (!m_initialized || !m_state) {
+        return json{{"success", false}, {"error", "Lua engine not initialized"}};
+    }
+
+    std::ifstream in(filepath, std::ios::binary);
+    if (!in) {
+        return json{{"success", false}, {"error", "File not found: " + filepath}};
+    }
+
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+
+    m_output_buffer.clear();
+    auto& lua = m_state->lua;
+
+    lua_sethook(lua.lua_state(), instruction_count_hook, LUA_MASKCOUNT, LUA_INSTRUCTION_LIMIT);
+    auto result = lua.safe_script(content, sol::script_pass_on_error);
+    lua_sethook(lua.lua_state(), nullptr, 0, 0);
+
+    json response;
+    response["output"] = m_output_buffer;
+    response["file"] = filepath;
+
+    if (result.valid()) {
+        sol::object val = result;
+        response["success"] = true;
+        response["result"] = sol_to_json(val);
+    } else {
+        sol::error err = result;
+        response["success"] = false;
+        response["error"] = err.what();
+    }
+
+    return response;
+}
+
+// ── get_globals — inspect top-level Lua global variables ───────────
+
+json LuaEngine::get_globals() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    if (!m_initialized || !m_state) {
+        return json{{"error", "Lua engine not initialized"}};
+    }
+
+    auto& lua = m_state->lua;
+
+    // Internal tables to skip
+    static const std::unordered_set<std::string> skip = {
+        "_G", "_VERSION", "_mcp_frame_callbacks", "_mcp_timers", "_mcp_coroutines",
+        "_mcp_scripts_dir", "_mcp_load_module", "_callback_ctx",
+        "arg", "utf8", "bit32", "coroutine", "debug", "math", "os",
+        "package", "string", "table", "collectgarbage", "require",
+        "assert", "error", "getmetatable", "setmetatable", "ipairs", "pairs",
+        "next", "pcall", "xpcall", "rawequal", "rawget", "rawlen", "rawset",
+        "select", "tonumber", "tostring", "type", "warn",
+        "load", "print" // our override
+    };
+
+    json globals = json::object();
+
+    sol::table global_table = lua.globals();
+    global_table.for_each([&](const sol::object& key, const sol::object& val) {
+        if (key.get_type() != sol::type::string) return;
+        std::string name = key.as<std::string>();
+
+        if (skip.count(name)) return;
+        if (name.size() > 0 && name[0] == '_') return; // skip internal _prefixed
+
+        json entry;
+        entry["type"] = sol::type_name(lua.lua_state(), val.get_type());
+
+        switch (val.get_type()) {
+            case sol::type::boolean:
+                entry["value"] = val.as<bool>();
+                break;
+            case sol::type::number:
+                entry["value"] = val.as<double>();
+                break;
+            case sol::type::string:
+                entry["value"] = val.as<std::string>();
+                break;
+            case sol::type::table: {
+                sol::table t = val.as<sol::table>();
+                int count = 0;
+                t.for_each([&](const sol::object&, const sol::object&) { count++; });
+                entry["entries"] = count;
+                break;
+            }
+            case sol::type::userdata:
+            case sol::type::lightuserdata: {
+                void* ptr = val.as<void*>();
+                entry["value"] = JsonHelpers::address_to_string(ptr);
+                break;
+            }
+            case sol::type::function:
+                entry["value"] = "<function>";
+                break;
+            default:
+                entry["value"] = "<" + std::string(sol::type_name(lua.lua_state(), val.get_type())) + ">";
+                break;
+        }
+
+        globals[name] = entry;
+    });
+
+    return json{{"globals", globals}, {"count", globals.size()}};
 }
