@@ -1,0 +1,25 @@
+# Build outputs
+plugin/build/
+**/bin/
+**/obj/
+
+# Dependencies (downloaded at build time)
+plugin/dependencies/cpp-httplib/
+plugin/dependencies/nlohmann/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Test cache
+tests/integration/__pycache__/
+tests/**/__pycache__/
+.pytest_cache/
+tests/.pytest_cache/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

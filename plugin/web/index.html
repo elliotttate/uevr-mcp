@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UEVR Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1 id="game-title">UEVR</h1>
+<p class="subtitle">UEVR-MCP Live Dashboard &mdash; <a class="nav-link" href="explorer.html">Object Explorer</a></p>
+
+<div class="grid">
+  <div class="card" id="status-card">
+    <h2><span class="dot"></span> Status</h2>
+    <div id="status-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card" id="gameinfo-card">
+    <h2><span class="dot"></span> Game Info</h2>
+    <div id="gameinfo-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card" id="player-card">
+    <h2><span class="dot"></span> Player</h2>
+    <div id="player-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card" id="camera-card">
+    <h2><span class="dot"></span> Camera</h2>
+    <div id="camera-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card" id="fps-card">
+    <h2><span class="dot"></span> FPS <span id="fps-value" style="color:#8b949e;font-size:0.8em"></span></h2>
+    <canvas id="fps-canvas" width="360" height="100"></canvas>
+  </div>
+
+  <div class="card" id="vr-card">
+    <h2><span class="dot"></span> VR Status</h2>
+    <div id="vr-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card" id="poses-card">
+    <h2><span class="dot"></span> VR Poses</h2>
+    <div id="poses-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card" id="vrsettings-card">
+    <h2><span class="dot"></span> VR Settings</h2>
+    <div id="vrsettings-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card" id="lua-card">
+    <h2><span class="dot"></span> Lua</h2>
+    <div id="lua-content"><span class="error-msg">Loading...</span></div>
+  </div>
+
+  <div class="card card-wide" id="console-card">
+    <h2><span class="dot"></span> Console Variables <span id="cvar-total" style="color:#8b949e;font-size:0.8em"></span></h2>
+    <div id="console-content">
+      <input type="text" class="search" id="cvar-search" placeholder="Search console variables...">
+      <div class="cvar-tabs" id="cvar-tabs">
+        <button class="cvar-tab" data-tab="favorites">Favorites</button>
+        <button class="cvar-tab" data-tab="changed">Changed</button>
+        <button class="cvar-tab active" data-tab="all">All CVars</button>
+      </div>
+      <div class="cvar-panel" id="cvar-panel-favorites" style="display:none"></div>
+      <div class="cvar-panel" id="cvar-panel-changed" style="display:none"></div>
+      <div class="cvar-panel" id="cvar-panel-all"></div>
+      <div class="console-exec">
+        <input type="text" class="search" id="console-input" placeholder="Execute console command...">
+        <button class="btn btn-primary" id="console-exec-btn">Exec</button>
+      </div>
+      <div id="console-status" class="console-status"></div>
+    </div>
+  </div>
+
+  <div class="card" id="spawned-card">
+    <h2><span class="dot"></span> Spawned Objects <span id="spawned-count" style="color:#8b949e;font-size:0.8em"></span></h2>
+    <div class="spawned-list" id="spawned-content"><span class="error-msg">Loading...</span></div>
+  </div>
+</div>
+
+<div class="poll-info" id="poll-info"></div>
+
+<script src="dashboard.js"></script>
+</body>
+</html>

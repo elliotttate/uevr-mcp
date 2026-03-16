@@ -1,0 +1,47 @@
+[cmake]
+version = "3.21"
+
+[project]
+name = "uevr-mcp-plugin"
+version = "1.0.0"
+languages = ["CXX"]
+
+[settings]
+CMAKE_CXX_STANDARD = 23
+CMAKE_CXX_STANDARD_REQUIRED = true
+
+[target.uevr_mcp]
+type = "shared"
+sources = [
+    "src/main.cpp",
+    "src/http_server.cpp",
+    "src/pipe_server.cpp",
+    "src/game_thread_queue.cpp",
+    "src/json_helpers.cpp",
+    "src/reflection/property_reader.cpp",
+    "src/reflection/property_writer.cpp",
+    "src/reflection/object_explorer.cpp",
+    "src/reflection/function_caller.cpp",
+    "src/routes/status_routes.cpp",
+    "src/routes/explorer_routes.cpp",
+    "src/routes/console_routes.cpp",
+    "src/routes/vr_routes.cpp",
+]
+include-directories = [
+    "include",
+    "dependencies",
+    "dependencies/cpp-httplib",
+    "dependencies/nlohmann",
+]
+link-libraries = ["ws2_32"]
+compile-features = ["cxx_std_23"]
+
+[target.uevr_mcp.properties]
+MSVC_RUNTIME_LIBRARY = "MultiThreaded"
+OUTPUT_NAME = "uevr_mcp"
+SUFFIX = ".dll"
+
+# MSVC flags
+[[target.uevr_mcp.compile-options]]
+condition = "MSVC"
+options = ["/EHa", "/MT", "/bigobj", "/utf-8"]
