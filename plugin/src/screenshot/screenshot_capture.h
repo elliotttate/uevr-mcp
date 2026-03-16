@@ -10,7 +10,7 @@ class ScreenshotCapture {
 public:
     static ScreenshotCapture& get();
 
-    void initialize(void* device, void* swap_chain, int renderer_type);
+    void initialize(void* device, void* swap_chain, void* command_queue, int renderer_type);
     void on_present(); // Called from render/present thread
 
     // Called from HTTP thread — blocks until capture completes or timeout
@@ -24,9 +24,11 @@ private:
     ScreenshotCapture() = default;
 
     void capture_d3d11();
+    void capture_d3d12();
 
     void* m_device{nullptr};
     void* m_swap_chain{nullptr};
+    void* m_command_queue{nullptr};
     int m_renderer_type{0};
     bool m_initialized{false};
 
@@ -44,4 +46,6 @@ private:
     int m_result_height{0};
     bool m_result_ready{false};
     std::string m_result_error;
+    int m_result_dxgi_format{0};
+    int m_result_row_pitch{0};
 };

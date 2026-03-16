@@ -60,9 +60,10 @@ void register_routes(httplib::Server& server) {
         result["initialized"] = cap.is_initialized();
 
         int rt = cap.renderer_type();
+        // UEVR_RENDERER_D3D11 = 0, UEVR_RENDERER_D3D12 = 1
         switch (rt) {
-            case 1:  result["rendererType"] = "D3D11"; break;
-            case 2:  result["rendererType"] = "D3D12"; break;
+            case 0:  result["rendererType"] = "D3D11"; break;
+            case 1:  result["rendererType"] = "D3D12"; break;
             default: result["rendererType"] = "Unknown"; break;
         }
 

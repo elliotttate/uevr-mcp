@@ -9,7 +9,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that g
 - **Screenshot from the GPU.** Capture the game's D3D11 backbuffer as JPEG — works even when the game window is behind other windows.
 - **Reverse-engineer anything.** Snapshot an object's state, perform an action, diff to see what changed. Hook any UFunction to log calls, block execution, or run Lua callbacks with argument inspection. Watch properties with Lua triggers for reactive scripting.
 - **Real-time event streaming.** Poll for hook fires, watch changes, and Lua output in real time via long-polling.
-- **Works across games.** Same 106 tools work on any Unreal Engine game that UEVR supports.
+- **Works across games.** Same 112 tools work on any Unreal Engine game that UEVR supports.
 
 ## Setup
 
@@ -99,11 +99,11 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
   +-----------------+
 ```
 
-**`plugin/`** — A C++ DLL loaded by UEVR inside the game. Embeds Lua 5.4 + Sol2, cpp-httplib, nlohmann/json. Starts an HTTP server on `localhost:8899` exposing 104 REST endpoints. Hooks into the engine tick, D3D present, and XInput callbacks. HTTP handler threads submit work to the game thread via a `GameThreadQueue` (std::promise/future, up to 16 items per tick, 5s timeout) to safely access UE internals. A named pipe (`\\.\pipe\UEVR_MCP`) provides a secondary channel for status and log operations that work even before the HTTP server is ready.
+**`plugin/`** — A C++ DLL loaded by UEVR inside the game. Embeds Lua 5.4 + Sol2, cpp-httplib, nlohmann/json. Starts an HTTP server on `localhost:8899` exposing 110 REST endpoints. Hooks into the engine tick, D3D present, and XInput callbacks. HTTP handler threads submit work to the game thread via a `GameThreadQueue` (std::promise/future, up to 16 items per tick, 5s timeout) to safely access UE internals. A named pipe (`\\.\pipe\UEVR_MCP`) provides a secondary channel for status and log operations that work even before the HTTP server is ready.
 
 **`mcp-server/`** — A standalone .NET console app that speaks MCP over stdio. Translates tool calls into HTTP requests, falling back to the named pipe for status/log/game-info when HTTP is unavailable.
 
-## 106 MCP Tools
+## 112 MCP Tools
 
 ### Object Exploration (12 tools)
 
@@ -276,6 +276,17 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 | `uevr_asset_classes` | List loaded asset types/classes |
 | `uevr_asset_load_class` | Find or load a UClass by name |
 
+### Deep Discovery (6 tools)
+
+| Tool | Description |
+|------|-------------|
+| `uevr_subclasses` | Find all subclasses of a base class — discover game-specific types (enemies, items, etc.) |
+| `uevr_search_names` | Search all reflected names (classes, properties, functions) — finds types without live instances |
+| `uevr_delegates` | Inspect delegate properties and event functions on an object (OnTakeDamage, OnDeath, etc.) |
+| `uevr_vtable` | Compare virtual function table against parent class — find overridden C++ functions |
+| `uevr_pattern_scan` | Signature scan executable memory for byte patterns with wildcards |
+| `uevr_all_children` | Brute-force enumerate all properties and functions across full inheritance chain |
+
 ### Function Hooks (5 tools)
 
 | Tool | Description |
@@ -424,7 +435,7 @@ uevr_macro_play("kill_actor", {target: "0x12345678"})
 
 ## HTTP API
 
-All 104 endpoints are accessible directly via HTTP at `http://localhost:8899/api`. Call `GET /api` for the full endpoint index. The MCP server is a thin wrapper — you can also use curl, a browser, or any HTTP client.
+All 110 endpoints are accessible directly via HTTP at `http://localhost:8899/api`. Call `GET /api` for the full endpoint index. The MCP server is a thin wrapper — you can also use curl, a browser, or any HTTP client.
 
 The web dashboard (if present in a `web/` folder next to the DLL) is served at `http://localhost:8899/`.
 

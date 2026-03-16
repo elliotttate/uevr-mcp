@@ -97,7 +97,7 @@ target_compile_definitions(uevr_mcp PRIVATE
     SOL_ALL_SAFETIES_ON=1
 )
 
-target_link_libraries(uevr_mcp PRIVATE ws2_32 lua54 d3d11 dxgi windowscodecs ole32)
+target_link_libraries(uevr_mcp PRIVATE ws2_32 lua54 d3d11 d3d12 dxgi windowscodecs ole32)
 
 # MSVC settings
 if(MSVC)

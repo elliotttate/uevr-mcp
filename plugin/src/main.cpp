@@ -57,6 +57,7 @@ public:
             ScreenshotCapture::get().initialize(
                 renderer->device,
                 renderer->swapchain,
+                renderer->command_queue,
                 renderer->renderer_type
             );
             pipe.log("Screenshot capture initialized (renderer type: " + std::to_string(renderer->renderer_type) + ")");

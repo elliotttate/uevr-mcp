@@ -94,38 +94,38 @@ void register_routes(httplib::Server& server) {
                 entry["name"] = name_utf8;
                 entry["category"] = compute_category(name_utf8);
 
-                auto cmd = elem.value->as_command();
-                entry["isCommand"] = (cmd != nullptr);
+                // Match UEVR's dump_commands() pattern exactly:
+                // Check AsCommand() first — only call GetFloat() on actual variables.
+                // locate_vtable_indices() only works on IConsoleVariable vtables,
+                // calling GetInt/GetFloat on commands gives garbage.
+                bool is_command = false;
+                try {
+                    is_command = (elem.value->as_command() != nullptr);
+                } catch (...) {
+                    continue;
+                }
 
-                // Always try to read values — as_command() can be unreliable
-                // in some UEVR builds and return true for actual variables
-                if (include_values) {
+                entry["isCommand"] = is_command;
+
+                if (!is_command && include_values) {
                     try {
-                        auto variable = console->find_variable(name.c_str());
-                        if (variable) {
-                            int iv = variable->get_int();
-                            float fv = variable->get_float();
-                            // Filter garbage: pointer-like int values (> 100M) with
-                            // garbage floats indicate console commands, not variables
-                            bool int_garbage = (iv > 100000000 || iv < -100000000);
-                            bool float_garbage = (fv != 0.0f && (std::abs(fv) < 1e-10f || std::abs(fv) > 1e15f));
-                            if (int_garbage && float_garbage) {
-                                continue; // Skip console commands
-                            }
-                            entry["int"] = iv;
-                            entry["float"] = fv;
-                            // Use whichever value is valid
-                            if (!int_garbage) {
-                                entry["value"] = (!float_garbage && iv != static_cast<int>(fv)) ? fv : iv;
-                            } else {
-                                entry["value"] = fv;
-                            }
+                        auto variable = static_cast<uevr::API::IConsoleVariable*>(elem.value);
+                        float fv = variable->get_float();
+                        int iv = variable->get_int();
+                        entry["float"] = fv;
+                        entry["int"] = iv;
+                        // Determine display value
+                        if (static_cast<float>(iv) == fv) {
+                            entry["value"] = iv;
                         } else {
-                            continue; // Not a variable at all
+                            entry["value"] = fv;
                         }
                     } catch (...) {
-                        continue;
+                        entry["value"] = 0;
                     }
+                } else if (is_command) {
+                    // Skip commands when fetching values
+                    if (include_values) continue;
                 }
 
                 vars.push_back(entry);
