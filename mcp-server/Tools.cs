@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 
@@ -1039,4 +1041,119 @@ public static class DiscoveryTools
         => await Http.Get("/api/discovery/all_children", new() {
             ["typeName"] = typeName, ["depth"] = depth?.ToString()
         });
+}
+
+[McpServerToolType]
+public class DispatcherTools
+{
+    internal static readonly Dictionary<string, (MethodInfo Method, string Description)> _methods = DiscoverTools();
+
+    private static Dictionary<string, (MethodInfo Method, string Description)> DiscoverTools()
+    {
+        var dict = new Dictionary<string, (MethodInfo Method, string Description)>(StringComparer.OrdinalIgnoreCase);
+        var types = typeof(DispatcherTools).Assembly.GetTypes();
+        foreach (var type in types)
+        {
+            if (type == typeof(DispatcherTools) || type.Name == "MetaTools") continue;
+            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            foreach (var method in methods)
+            {
+                var attr = method.GetCustomAttribute<McpServerToolAttribute>();
+                if (attr != null)
+                {
+                    var descAttr = method.GetCustomAttribute<DescriptionAttribute>();
+                    dict[attr.Name] = (method, descAttr?.Description ?? "No description available.");
+                }
+            }
+        }
+        return dict;
+    }
+
+    [McpServerTool(Name = "uevr")]
+    [Description("Universal entry point for all UEVR functions. Use argument \"tool\" 'list' or any other non-existent tool to get a list of tools back")]
+    public async Task<string> Uevr(
+        [Description("Internal tool name to call (e.g. 'uevr_get_status', 'list')")] string tool,
+        [Description("Arguments for the tool as JSON object")] string? arguments = null)
+    {
+        if (!_methods.TryGetValue(tool, out var entry))
+        {
+            return $"{{\"error\":\"Unknown tool: {tool}\", \"available_tools\": {JsonSerializer.Serialize(_methods.Keys)}}}";
+        }
+
+        var method = entry.Method;
+        try
+        {
+            var parameters = method.GetParameters();
+            var argList = new object?[parameters.Length];
+
+            JsonElement? argsJson = null;
+            if (!string.IsNullOrEmpty(arguments))
+            {
+                argsJson = JsonSerializer.Deserialize<JsonElement>(arguments);
+            }
+
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                var p = parameters[i];
+                var name = p.Name;
+                if (name == null) continue;
+
+                if (argsJson.HasValue && argsJson.Value.ValueKind == JsonValueKind.Object && argsJson.Value.TryGetProperty(name, out var prop))
+                {
+                    argList[i] = JsonSerializer.Deserialize(prop.GetRawText(), p.ParameterType);
+                }
+                else if (p.HasDefaultValue)
+                {
+                    argList[i] = p.DefaultValue;
+                }
+                else
+                {
+                    argList[i] = null;
+                }
+            }
+
+            var result = method.Invoke(null, argList);
+            if (result is Task t)
+            {
+                await t;
+                var resultProperty = t.GetType().GetProperty("Result");
+                if (resultProperty != null)
+                {
+                    var val = resultProperty.GetValue(t);
+                    return val?.ToString() ?? "{}";
+                }
+                return "{}";
+            }
+            return result?.ToString() ?? "{}";
+        }
+        catch (Exception ex)
+        {
+            var innerMsg = ex.InnerException?.Message ?? ex.Message;
+            return $"{{\"error\":\"{innerMsg.Replace("\"", "\\\"")}\", \"stack\":\"{ex.StackTrace?.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"}}";
+        }
+    }
+}
+
+[McpServerToolType]
+public static class MetaTools
+{
+    [McpServerTool(Name = "list_tools")]
+    [Description("Returns a detailed list of all available UEVR tools, including their descriptions and parameters.")]
+    public static string ListTools()
+    {
+        var toolInfos = DispatcherTools._methods.Select(kvp => new
+        {
+            Name = kvp.Key,
+            Description = kvp.Value.Description,
+            Parameters = kvp.Value.Method.GetParameters().Select(p => new
+            {
+                Name = p.Name,
+                Type = p.ParameterType.Name,
+                Description = p.GetCustomAttribute<DescriptionAttribute>()?.Description ?? "No description",
+                DefaultValue = p.HasDefaultValue ? p.DefaultValue : null
+            })
+        });
+
+        return JsonSerializer.Serialize(new { tools = toolInfos });
+    }
 }

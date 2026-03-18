@@ -105,12 +105,29 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 
 **`mcp-server/`** — A standalone .NET console app that speaks MCP over stdio. Translates tool calls into HTTP requests, falling back to the named pipe for status/log/game-info when HTTP is unavailable. Diagnostics tools map directly to the HTTP snapshot and per-surface diagnostics routes.
 
-## 116 MCP Tools
+## 117 MCP Tools
 
-### Object Exploration (12 tools)
+Starting in **v1.2.0**, the server supports two distinct tool exposure modes.
+
+### Selective Tool Exposure
+
+To prevent "tool overload" for smaller LLMs, you can run the server in **Consolidated Mode**. This exposes just two tools: a universal dispatcher (`uevr`) and a detailed helper (`list_tools`).
+
+To enable this, pass the `--single-tool` flag:
+
+```bash
+dotnet run --project mcp-server -- --single-tool
+```
+
+- **In Consolidated Mode**: Use the `uevr` tool to call any internal function (e.g. `uevr_get_status`). Use `list_tools` to see the full manifest of internal functions.
+- **In Standard Mode (Default)**: All 110+ tools are exposed as individual MCP functions.
+
+### Object Exploration (13 tools)
 
 | Tool | Description |
 |------|-------------|
+| `list_tools` | **[New in 1.2.0]** Returns a detailed JSON list of all internal tools, descriptions, and parameters. |
+| `uevr` | **[New in 1.2.0]** Universal dispatcher for calling any internal tool (use in Consolidated Mode). |
 | `uevr_search_objects` | Search GUObjectArray by name substring |
 | `uevr_search_classes` | Search UClass objects by name |
 | `uevr_get_type` | Full type schema — all fields with types/offsets, all methods with signatures |

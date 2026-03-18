@@ -3,7 +3,7 @@
     "uevr": {
       "type": "stdio",
       "command": "dotnet",
-      "args": ["run", "--project", "mcp-server"]
+      "args": ["run", "--project", "mcp-server", "--", "--single-tool"]
     }
   }
 }
