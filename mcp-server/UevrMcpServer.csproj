@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
     <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+    <Version>1.2.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="*-*" />

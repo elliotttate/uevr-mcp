@@ -8,9 +8,10 @@ UEVR-MCP lets you inspect and manipulate Unreal Engine game state at runtime via
 
 ## Getting Started
 
-1. **Check status**: `uevr_get_status` — confirms plugin is loaded, shows game process and VR runtime
-2. **Get player**: `uevr_get_player` — returns player controller and pawn addresses
-3. **Explore from there**: Use `uevr_summary` on an address for a quick field overview, then drill into specific fields
+1. **Check status**: `uevr_get_status` — confirms plugin is loaded
+2. **Explore tools**: `list_tools` — **[New in 1.2.0]** Returns a detailed JSON list of all internal tools and parameters
+3. **Get player**: `uevr_get_player` — returns player controller and pawn addresses
+4. **Explore from there**: Use `uevr_summary` on an address for a quick field overview
 
 ## Exploration Flow
 
