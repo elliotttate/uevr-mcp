@@ -172,7 +172,7 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 | `uevr_set_vr_setting` | Change any VR setting or arbitrary mod value |
 | `uevr_vr_input` | Controller input state: joystick axes, movement orientation, OpenXR action queries |
 | `uevr_get_world_scale` | Get WorldToMetersScale from UWorld (default 100) |
-| `uevr_set_world_scale` | Set WorldToMetersScale — lower = player feels larger, higher = smaller |
+| `uevr_set_world_scale` | Set WorldToMetersScale — lower = player feels larger, higher = smaller. Some games reset each tick; use a looping timer to persist. |
 | `uevr_recenter` | Recenter the VR view |
 | `uevr_haptics` | Trigger controller vibration |
 | `uevr_save_config` | Save UEVR config to disk |
@@ -182,8 +182,8 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 
 | Tool | Description |
 |------|-------------|
-| `uevr_attach_to_controller` | Attach an actor/component to a VR controller (left/right/HMD) with position/rotation offsets |
-| `uevr_detach_from_controller` | Detach an object from its motion controller |
+| `uevr_attach_to_controller` | Attach a USceneComponent to a VR controller (left/right/HMD) with position/rotation offsets. Must be a component address, not an actor — use `uevr_world_components` to find them. |
+| `uevr_detach_from_controller` | Detach a component from its motion controller |
 | `uevr_list_motion_controllers` | List all current motion controller attachments |
 | `uevr_clear_motion_controllers` | Remove all motion controller attachments |
 

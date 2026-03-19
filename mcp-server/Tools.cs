@@ -315,7 +315,7 @@ public static class VrTools
         => await Http.Get("/api/vr/world_scale");
 
     [McpServerTool(Name = "uevr_set_world_scale")]
-    [Description("Set the world-to-meters scale on UWorld. Default is 100. Lower values make the player feel larger (like a giant), higher values make them feel smaller (like a mouse). Example: 50 = everything appears twice as large, 200 = everything appears half size.")]
+    [Description("Set the world-to-meters scale on WorldSettings. Default is 100. Lower values make the player feel larger (like a giant), higher values make them feel smaller (like a mouse). NOTE: many games reset this value each tick — if it doesn't persist, use uevr_timer_create with looping=true to reapply it every frame via Lua.")]
     public static async Task<string> SetWorldScale(
         [Description("World-to-meters scale value (must be > 0, default is 100)")] float scale)
         => await Http.Post("/api/vr/world_scale", new { scale });
@@ -327,9 +327,9 @@ public static class VrTools
 public static class MotionControllerTools
 {
     [McpServerTool(Name = "uevr_attach_to_controller")]
-    [Description("Attach a game object (actor/component) to a VR motion controller. The object will track the controller's position and rotation in real-time. This is the core mechanism for making VR mods feel native — attach weapons, tools, or UI to the player's hands.")]
+    [Description("Attach a USceneComponent to a VR motion controller. IMPORTANT: the address must be a component (SkeletalMeshComponent, StaticMeshComponent, etc.), NOT an Actor — use uevr_world_components to find component addresses. The component will track the controller's position and rotation in real-time.")]
     public static async Task<string> Attach(
-        [Description("Object address (0xHEX) to attach")] string address,
+        [Description("Component address (0xHEX) — must be a USceneComponent, not an Actor")] string address,
         [Description("Which hand: 'left', 'right', or 'hmd' (default 'right')")] string hand = "right",
         [Description("Keep attachment across level transitions (default true)")] bool permanent = true,
         [Description("Position offset from controller {x, y, z} (default {0,0,0})")] string? locationOffset = null,
@@ -349,9 +349,9 @@ public static class MotionControllerTools
     }
 
     [McpServerTool(Name = "uevr_detach_from_controller")]
-    [Description("Detach an object from its VR motion controller. The object stops tracking the controller and returns to its original transform behavior.")]
+    [Description("Detach a component from its VR motion controller. The component stops tracking the controller.")]
     public static async Task<string> Detach(
-        [Description("Object address (0xHEX) to detach")] string address)
+        [Description("Component address (0xHEX) to detach")] string address)
         => await Http.Post("/api/vr/detach", new { address });
 
     [McpServerTool(Name = "uevr_list_motion_controllers")]

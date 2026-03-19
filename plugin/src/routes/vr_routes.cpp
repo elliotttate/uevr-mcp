@@ -283,27 +283,27 @@ void register_routes(httplib::Server& server) {
         res.set_content(result.dump(2), "application/json");
     });
 
-    // GET /api/vr/world_scale — Get world-to-meters scale from UWorld
+    // GET /api/vr/world_scale — Get world-to-meters scale
+    // The property is "WorldToMeters" on WorldSettings (not "WorldToMetersScale" on World).
     server.Get("/api/vr/world_scale", [](const httplib::Request&, httplib::Response& res) {
         auto result = GameThreadQueue::get().submit_and_wait([]() -> json {
             auto& api = uevr::API::get();
             if (!api) return json{{"error", "API not available"}};
 
-            // Find UWorld class and get first instance
-            auto* world_cls = api->find_uobject<uevr::API::UClass>(L"Class /Script/Engine.World");
-            if (!world_cls) return json{{"error", "Could not find World class"}};
+            // Find WorldSettings class and get first instance
+            auto* ws_cls = api->find_uobject<uevr::API::UClass>(L"Class /Script/Engine.WorldSettings");
+            if (!ws_cls) return json{{"error", "Could not find WorldSettings class"}};
 
-            auto* world = uevr::API::UObjectHook::get_first_object_by_class(world_cls);
-            if (!world) return json{{"error", "No World instance found"}};
+            auto* ws = uevr::API::UObjectHook::get_first_object_by_class(ws_cls);
+            if (!ws) return json{{"error", "No WorldSettings instance found"}};
 
-            // Read WorldToMetersScale via reflection
-            auto* type = reinterpret_cast<uevr::API::UStruct*>(world->get_class());
-            if (!type) return json{{"error", "World has no class"}};
+            auto* type = reinterpret_cast<uevr::API::UStruct*>(ws->get_class());
+            if (!type) return json{{"error", "WorldSettings has no class"}};
 
-            auto* prop = type->find_property(L"WorldToMetersScale");
+            auto* prop = type->find_property(L"WorldToMeters");
             float scale = 100.0f; // UE default
             if (prop) {
-                auto val = PropertyReader::read_property(world, prop, 1);
+                auto val = PropertyReader::read_property(ws, prop, 1);
                 if (val.contains("value") && val["value"].is_number()) {
                     scale = val["value"].get<float>();
                 }
@@ -311,7 +311,7 @@ void register_routes(httplib::Server& server) {
 
             return json{
                 {"worldToMetersScale", scale},
-                {"worldAddress", JsonHelpers::address_to_string(world)}
+                {"worldSettingsAddress", JsonHelpers::address_to_string(ws)}
             };
         });
 
@@ -319,7 +319,7 @@ void register_routes(httplib::Server& server) {
         res.set_content(result.dump(2), "application/json");
     });
 
-    // POST /api/vr/world_scale — Set world-to-meters scale on UWorld
+    // POST /api/vr/world_scale — Set world-to-meters scale
     server.Post("/api/vr/world_scale", [](const httplib::Request& req, httplib::Response& res) {
         json body;
         try { body = json::parse(req.body); } catch (...) {
@@ -345,27 +345,27 @@ void register_routes(httplib::Server& server) {
             auto& api = uevr::API::get();
             if (!api) return json{{"error", "API not available"}};
 
-            auto* world_cls = api->find_uobject<uevr::API::UClass>(L"Class /Script/Engine.World");
-            if (!world_cls) return json{{"error", "Could not find World class"}};
+            auto* ws_cls = api->find_uobject<uevr::API::UClass>(L"Class /Script/Engine.WorldSettings");
+            if (!ws_cls) return json{{"error", "Could not find WorldSettings class"}};
 
-            auto* world = uevr::API::UObjectHook::get_first_object_by_class(world_cls);
-            if (!world) return json{{"error", "No World instance found"}};
+            auto* ws = uevr::API::UObjectHook::get_first_object_by_class(ws_cls);
+            if (!ws) return json{{"error", "No WorldSettings instance found"}};
 
-            auto* type = reinterpret_cast<uevr::API::UStruct*>(world->get_class());
-            if (!type) return json{{"error", "World has no class"}};
+            auto* type = reinterpret_cast<uevr::API::UStruct*>(ws->get_class());
+            if (!type) return json{{"error", "WorldSettings has no class"}};
 
-            auto* prop = type->find_property(L"WorldToMetersScale");
-            if (!prop) return json{{"error", "WorldToMetersScale property not found on World"}};
+            auto* prop = type->find_property(L"WorldToMeters");
+            if (!prop) return json{{"error", "WorldToMeters property not found on WorldSettings"}};
 
             std::string error;
-            if (!PropertyWriter::write_property(world, prop, json(new_scale), error)) {
+            if (!PropertyWriter::write_property(ws, prop, json(new_scale), error)) {
                 return json{{"error", error}};
             }
 
             return json{
                 {"success", true},
                 {"worldToMetersScale", new_scale},
-                {"worldAddress", JsonHelpers::address_to_string(world)}
+                {"worldSettingsAddress", JsonHelpers::address_to_string(ws)}
             };
         });
 

@@ -96,7 +96,7 @@ void register_routes(httplib::Server& server) {
 
             auto* state = API::UObjectHook::get_or_add_motion_controller_state(obj);
             if (!state) {
-                return json{{"error", "Failed to create motion controller state for object"}};
+                return json{{"error", "Failed to create motion controller state — the address must be a USceneComponent (e.g. SkeletalMeshComponent, StaticMeshComponent), not an Actor. Use uevr_world_components to find component addresses on an actor."}};
             }
 
             state->set_hand(hand);
