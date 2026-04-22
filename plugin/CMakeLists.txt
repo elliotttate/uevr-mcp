@@ -61,6 +61,7 @@ add_library(uevr_mcp SHARED
     src/reflection/object_explorer.cpp
     src/reflection/function_caller.cpp
     src/reflection/object_registry.cpp
+    src/reflection/property_probes.cpp
     src/lua/lua_engine.cpp
     src/routes/status_routes.cpp
     src/routes/log_routes.cpp

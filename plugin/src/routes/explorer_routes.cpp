@@ -6,6 +6,7 @@
 #include "../reflection/property_reader.h"
 #include "../reflection/property_writer.h"
 #include "../reflection/function_caller.h"
+#include "../reflection/property_probes.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -617,6 +618,24 @@ void register_routes(httplib::Server& server) {
             },
             timeout_ms);
         send_json(res, result);
+    });
+
+    // GET /api/dump/probe_status — Report which property-subclass field offsets
+    // the self-discovery probes have resolved. Useful cross-game to verify
+    // PropertyClass, MetaClass, InterfaceClass, MapKey/Value, SetElement and
+    // delegate signature probes all resolved on the current target. Each
+    // entry includes status (resolved/failed/undiscovered), offset, and hit
+    // count since injection.
+    server.Get("/api/dump/probe_status", [](const httplib::Request&, httplib::Response& res) {
+        send_json(res, PropertyProbes::diagnostics());
+    });
+
+    // POST /api/dump/probe_reset — Clear all probe caches. After a game
+    // hot-reload (rare — most UE games don't support it) or when testing,
+    // this forces re-discovery on the next dump.
+    server.Post("/api/dump/probe_reset", [](const httplib::Request&, httplib::Response& res) {
+        PropertyProbes::reset();
+        send_json(res, json{{"ok", true}, {"reset", true}});
     });
 }
 

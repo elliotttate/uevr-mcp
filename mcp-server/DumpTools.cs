@@ -51,6 +51,16 @@ public static class DumpTools
         return JsonSerializer.Serialize(new { ok = true, cleared = true }, JsonOpts);
     }
 
+    [McpServerTool(Name = "uevr_probe_status")]
+    [Description("Report which FProperty subclass field offsets have been self-discovered by the plugin probes: FObjectProperty::PropertyClass, FClassProperty::MetaClass, FInterfaceProperty::InterfaceClass, FMapProperty::KeyProp/ValueProp, FSetProperty::ElementProp, and F*DelegateProperty::SignatureFunction. Use this on a new game to verify the probes locked onto the right offsets before trusting the dump's typed references.")]
+    public static async Task<string> ProbeStatus()
+        => await Http.Get("/api/dump/probe_status");
+
+    [McpServerTool(Name = "uevr_probe_reset")]
+    [Description("Clear all property-subclass offset caches so the plugin re-discovers them on the next dump. Rare — useful after game hot-reload (if supported) or cross-game testing with shared plugin processes.")]
+    public static async Task<string> ProbeReset()
+        => await Http.Post("/api/dump/probe_reset", new { });
+
     [McpServerTool(Name = "uevr_dump_cache_status")]
     [Description("Report whether a cached reflection walk is warm and how old it is. Useful to decide between cheap reuse and a fresh dump.")]
     public static string DumpCacheStatus()
@@ -239,6 +249,67 @@ public static class DumpTools
 
     // ─── Tool 2: C++ SDK emitter (Dumper-7 style lite) ─────────────────
 
+    // Thread-local inheritance map set during DumpSdkCpp so RenderCppFromTag can
+    // decide whether to prefix a UClass name with 'A' (Actor subclass) or 'U'
+    // (any other UObject) to match UE C++ naming conventions.
+    [ThreadStatic] static Dictionary<string, string>? _superMap;
+
+    // A chain reaches Actor if it walks to any of these well-known Actor
+    // descendants. The supermap only contains classes in the current filter
+    // scope; engine base classes typically aren't there, so we treat reaching
+    // one of the stock UE Actor types as conclusive. List is the stock UE
+    // inheritance tree as of UE4.22–UE5.4.
+    static readonly HashSet<string> _actorBases = new(StringComparer.Ordinal) {
+        "Actor", "AActor",
+        "Pawn", "APawn",
+        "Character", "ACharacter",
+        "Controller", "AController",
+        "PlayerController", "APlayerController",
+        "AIController", "AAIController",
+        "HUD", "AHUD",
+        "GameMode", "AGameMode", "GameModeBase", "AGameModeBase",
+        "GameState", "AGameState", "GameStateBase", "AGameStateBase",
+        "PlayerState", "APlayerState",
+        "WorldSettings", "AWorldSettings",
+        "Info", "AInfo",
+        "Volume", "AVolume",
+        "StaticMeshActor", "AStaticMeshActor",
+        "SkeletalMeshActor", "ASkeletalMeshActor",
+        "Light", "ALight", "PointLight", "APointLight", "SpotLight", "ASpotLight", "DirectionalLight", "ADirectionalLight",
+        "CameraActor", "ACameraActor",
+        "TriggerBox", "ATriggerBox",
+        "NavigationData", "ANavigationData",
+        "Brush", "ABrush",
+    };
+
+    static bool ChainReachesActor(string name, Dictionary<string, string> map)
+    {
+        // Cap the walk at 32 to dodge cyclic or deeply nested inputs.
+        var cur = name;
+        for (int i = 0; i < 32; i++)
+        {
+            if (_actorBases.Contains(cur)) return true;
+            if (!map.TryGetValue(cur, out var sup)) return false;
+            cur = sup;
+        }
+        return false;
+    }
+
+    static string UePrefix(string className)
+    {
+        // UE reflection sometimes keeps the C++ prefix on FNames ("AAISkill") and
+        // sometimes strips it ("Character_AI"). Try the name as-is and with an
+        // 'A' prepended; either form hitting the Actor chain means Actor-derived.
+        var map = _superMap;
+        if (map is null) return "U";
+        if (ChainReachesActor(className, map)) return "A";
+        if (!className.StartsWith("A", StringComparison.Ordinal) &&
+            ChainReachesActor("A" + className, map)) return "A";
+        if (className.StartsWith("A", StringComparison.Ordinal) && className.Length > 1 &&
+            ChainReachesActor(className.Substring(1), map)) return "A";
+        return "U";
+    }
+
     [McpServerTool(Name = "uevr_dump_sdk_cpp")]
     [Description("Emit a minimal C++ SDK (one .hpp per class/struct) from live reflection. Output mirrors the Dumper-7 shape: struct with field decls at correct offsets, super-class inheritance. Useful for writing C++ mods that share the game's layouts. Methods are OFF by default — they force a much slower reflection walk (per-UFunction param enumeration) and are only useful as comments. Turn on with includeMethods=true if you need them.")]
     public static async Task<string> DumpSdkCpp(
@@ -247,7 +318,10 @@ public static class DumpTools
         [Description("Emit method stub list in comments. Default false — turning on slows the dump significantly.")] bool includeMethods = false,
         [Description("Skip built-in engine types (/Script/Engine, /Script/CoreUObject, etc.) — default false.")] bool skipEngine = false)
     {
-        using var doc = await FetchReflection(filter, includeMethods, false);
+        // Fetch with enums=true so we share the cache with uevr_dump_usmap — back-to-
+        // back dump tools get one reflection walk instead of two. Enums aren't used
+        // by the SDK emitter; loading them costs a tiny amount of extra payload.
+        using var doc = await FetchReflection(filter, includeMethods, enums: true);
         if (doc.RootElement.TryGetProperty("error", out var err))
         {
             // Surface batch timings if present so the caller can diagnose which slice hung.
@@ -262,6 +336,21 @@ public static class DumpTools
         }
 
         Directory.CreateDirectory(outDir);
+
+        // Build a lightweight className -> super map so RenderCppFromTag can choose
+        // the correct UE prefix ('A' for Actor-descended classes, 'U' otherwise).
+        // Scoped per call via ThreadStatic; cleared in finally below.
+        var superMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (doc.RootElement.TryGetProperty("classes", out var clsForMap))
+            foreach (var c in clsForMap.EnumerateArray())
+            {
+                var nm = c.GetProperty("name").GetString();
+                if (nm is null) continue;
+                if (c.TryGetProperty("super", out var sp) && sp.GetString() is string s)
+                    superMap[nm] = s;
+            }
+        _superMap = superMap;
+        try {
 
         var emitted = new List<string>();
         var all = new StringBuilder();
@@ -305,7 +394,9 @@ public static class DumpTools
                         // Read richer type info from the recursive `tag` object.
                         JsonElement tag = default;
                         bool hasTag = f.TryGetProperty("tag", out tag) && tag.ValueKind == JsonValueKind.Object;
-                        string cppType = hasTag ? CppTypeForTag(tag) : CppTypeFor(ftype);
+                        // Prefer the richer probe-aware renderer when we have a tag —
+                        // falls back to plain CppTypeFor for legacy flat-field dumps.
+                        string cppType = hasTag ? RenderCppFromTag(tag) : CppTypeFor(ftype);
                         string extra = hasTag ? ExtraFromTag(tag) : ExtraFromFlat(f);
 
                         sb.AppendLine($"    {cppType,-28} {SanitizeIdent(fname)}; // +0x{offset:X} ({ftype}){extra}");
@@ -350,6 +441,7 @@ public static class DumpTools
             headerCount = emitted.Count,
             allInOne = Path.Combine(Path.GetFullPath(outDir), "sdk.hpp"),
         });
+        } finally { _superMap = null; }
     }
 
     // ─── Tool 3: .usmap v4 emitter (jmap-compatible) ───────────────────
@@ -685,6 +777,8 @@ public static class DumpTools
                 break;
 
             case T_MapProperty:
+                // Plugin now resolves FMapProperty::KeyProp / ValueProp via raw-
+                // memory probe (Phase 1). Emit real inner tags when present.
                 if (tag.TryGetProperty("key", out var key) && key.ValueKind == JsonValueKind.Object)
                     WriteTag(bw, key, intern);
                 else
@@ -702,6 +796,76 @@ public static class DumpTools
                     bw.Write(T_ByteProperty);
                 bw.Write((uint)intern(tag.TryGetProperty("enumName", out var en) ? en.GetString() : null));
                 break;
+        }
+    }
+
+    // Render a C++ type string from a recursive tag. Uses Phase 1 probe output
+    // to emit concrete class names (`AMyActor*`, `TMap<FName, FVector>`) instead
+    // of `void*` fallbacks.
+    static string RenderCppFromTag(JsonElement tag)
+    {
+        var type = tag.TryGetProperty("type", out var ty) ? ty.GetString() ?? "Unknown" : "Unknown";
+        switch (type)
+        {
+            case "ArrayProperty":
+                return "TArray<" + (tag.TryGetProperty("inner", out var ai) && ai.ValueKind == JsonValueKind.Object
+                    ? RenderCppFromTag(ai) : "uint8_t") + ">";
+            case "SetProperty":
+                return "TSet<" + (tag.TryGetProperty("inner", out var si) && si.ValueKind == JsonValueKind.Object
+                    ? RenderCppFromTag(si) : "uint8_t") + ">";
+            case "OptionalProperty":
+                return "TOptional<" + (tag.TryGetProperty("inner", out var oi) && oi.ValueKind == JsonValueKind.Object
+                    ? RenderCppFromTag(oi) : "uint8_t") + ">";
+            case "MapProperty":
+            {
+                string kt = tag.TryGetProperty("key",   out var k) && k.ValueKind == JsonValueKind.Object ? RenderCppFromTag(k) : "void*";
+                string vt = tag.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.Object ? RenderCppFromTag(v) : "void*";
+                return $"TMap<{kt}, {vt}>";
+            }
+            case "StructProperty":
+            {
+                var sn = tag.TryGetProperty("structName", out var snEl) ? snEl.GetString() : null;
+                return string.IsNullOrEmpty(sn) ? "uint8_t[] /*struct*/" : "F" + SanitizeIdent(sn!);
+            }
+            case "EnumProperty":
+            {
+                var en = tag.TryGetProperty("enumName", out var enEl) ? enEl.GetString() : null;
+                return string.IsNullOrEmpty(en) ? "uint8_t /*enum*/" : SanitizeIdent(en!);
+            }
+            case "ObjectProperty":
+            case "WeakObjectProperty":
+            case "LazyObjectProperty":
+            case "SoftObjectProperty":
+            case "AssetObjectProperty":
+            {
+                var pc = tag.TryGetProperty("propertyClass", out var pcEl) ? pcEl.GetString() : null;
+                if (string.IsNullOrEmpty(pc)) return "void* /*UObject*/";
+                // UE prefix convention: 'A' for Actor-descended classes, 'U' for
+                // everything else. Resolved via ThreadStatic super-map from the
+                // enclosing DumpSdkCpp call.
+                return $"{UePrefix(pc!)}{SanitizeIdent(pc!)}* ";
+            }
+            case "ClassProperty":
+            case "SoftClassProperty":
+            {
+                var mc = tag.TryGetProperty("metaClass", out var mcEl) ? mcEl.GetString() : null;
+                return string.IsNullOrEmpty(mc)
+                    ? "UClass* "
+                    : $"TSubclassOf<{UePrefix(mc!)}{SanitizeIdent(mc!)}>";
+            }
+            case "InterfaceProperty":
+            {
+                var ic = tag.TryGetProperty("interfaceClass", out var icEl) ? icEl.GetString() : null;
+                // Interfaces always take the 'I' prefix by UE convention.
+                return string.IsNullOrEmpty(ic) ? "void* /*interface*/" : $"TScriptInterface<I{SanitizeIdent(ic!)}>";
+            }
+            case "DelegateProperty":
+            case "MulticastDelegateProperty":
+            case "MulticastInlineDelegateProperty":
+            case "MulticastSparseDelegateProperty":
+                return "void* /*delegate*/";
+            default:
+                return CppTypeFor(type);
         }
     }
 
@@ -825,11 +989,32 @@ public static class DumpTools
             return " /*struct " + sn.GetString() + "*/";
         if (type == "EnumProperty" && tag.TryGetProperty("enumName", out var en))
             return " /*enum " + en.GetString() + "*/";
+        // Phase 1: probe-derived concrete class names.
+        if ((type == "ObjectProperty" || type == "WeakObjectProperty" || type == "LazyObjectProperty"
+           || type == "SoftObjectProperty" || type == "AssetObjectProperty")
+            && tag.TryGetProperty("propertyClass", out var pc))
+            return " /*-> " + pc.GetString() + "*/";
+        if ((type == "ClassProperty" || type == "SoftClassProperty")
+            && tag.TryGetProperty("metaClass", out var mc))
+            return " /*TSubclassOf<" + mc.GetString() + ">*/";
+        if (type == "InterfaceProperty" && tag.TryGetProperty("interfaceClass", out var ic))
+            return " /*I" + ic.GetString() + "*/";
+        if ((type == "DelegateProperty" || type == "MulticastDelegateProperty"
+          || type == "MulticastInlineDelegateProperty" || type == "MulticastSparseDelegateProperty")
+            && tag.TryGetProperty("signatureFunction", out var sf))
+            return " /*sig " + sf.GetString() + "*/";
         if ((type == "ArrayProperty" || type == "SetProperty" || type == "OptionalProperty")
              && tag.TryGetProperty("inner", out var inner))
         {
             var it = inner.TryGetProperty("type", out var itt) ? itt.GetString() : "Unknown";
             return $" /*inner {it}*/";
+        }
+        if (type == "MapProperty"
+            && (tag.TryGetProperty("key", out var kt) || tag.TryGetProperty("value", out _)))
+        {
+            var kType = tag.TryGetProperty("key",   out var kEl) && kEl.TryGetProperty("type", out var kt2) ? kt2.GetString() : "?";
+            var vType = tag.TryGetProperty("value", out var vEl) && vEl.TryGetProperty("type", out var vt2) ? vt2.GetString() : "?";
+            return $" /*key={kType}, value={vType}*/";
         }
         return "";
     }

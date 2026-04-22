@@ -1,6 +1,7 @@
 #include "object_explorer.h"
 #include "property_reader.h"
 #include "function_caller.h"
+#include "property_probes.h"
 #include "../json_helpers.h"
 
 #include <algorithm>
@@ -36,6 +37,16 @@ static bool contains_ci(const std::string& haystack, const std::string& needle) 
 // FMapProperty / FSetProperty key/value/element props are not exposed by
 // UEVR's public API (no wrappers for them), so those emit without inner
 // children — downstream tools fall back to best-effort parsing.
+
+// Helper: append a typed class name to the tag if the probe resolved the
+// property's concrete class. Result keeps jmap's "PropertyClass" naming.
+static void attach_class_name(nlohmann::json& tag, const char* key, uevr::API::UStruct* c)
+{
+    if (!c) return;
+    auto fname = c->get_fname();
+    if (!fname) return;
+    tag[key] = JsonHelpers::wide_to_utf8(fname->to_string());
+}
 
 static nlohmann::json build_property_tag(uevr::API::FProperty* prop) {
     nlohmann::json tag;
@@ -74,8 +85,35 @@ static nlohmann::json build_property_tag(uevr::API::FProperty* prop) {
         tag["byteOffset"] = bp->get_byte_offset();
         tag["byteMask"]   = bp->get_byte_mask();
         tag["fieldMask"]  = bp->get_field_mask();
+    } else if (type == "ObjectProperty"     || type == "WeakObjectProperty"
+            || type == "LazyObjectProperty" || type == "SoftObjectProperty"
+            || type == "AssetObjectProperty") {
+        // Phase 1 probe: resolve the concrete referenced UClass so consumers
+        // can emit `AFoo*` instead of `void* /*UObject*/`.
+        attach_class_name(tag, "propertyClass", PropertyProbes::get_property_class(prop));
+    } else if (type == "ClassProperty" || type == "SoftClassProperty") {
+        // TSubclassOf<T>: PropertyClass is UClass, MetaClass is T.
+        attach_class_name(tag, "propertyClass", PropertyProbes::get_property_class(prop));
+        attach_class_name(tag, "metaClass",     PropertyProbes::get_meta_class(prop));
+    } else if (type == "InterfaceProperty") {
+        attach_class_name(tag, "interfaceClass", PropertyProbes::get_interface_class(prop));
+    } else if (type == "MapProperty") {
+        // Phase 1 probe: recurse into key/value inner FProperty descriptors.
+        if (auto kp = PropertyProbes::get_map_key_prop(prop))   tag["key"]   = build_property_tag(kp);
+        if (auto vp = PropertyProbes::get_map_value_prop(prop)) tag["value"] = build_property_tag(vp);
+    } else if (type == "SetProperty") {
+        if (auto ep = PropertyProbes::get_set_element_prop(prop)) tag["inner"] = build_property_tag(ep);
+    } else if (type == "DelegateProperty"
+            || type == "MulticastDelegateProperty"
+            || type == "MulticastInlineDelegateProperty"
+            || type == "MulticastSparseDelegateProperty") {
+        // Signature function describes the delegate's parameter list.
+        auto sig = PropertyProbes::get_signature_function(prop);
+        if (sig) {
+            auto fname = sig->get_fname();
+            if (fname) tag["signatureFunction"] = JsonHelpers::wide_to_utf8(fname->to_string());
+        }
     }
-    // FMapProperty / FSetProperty have no UEVR wrappers — caller emits Unknown inners.
 
     return tag;
 }
@@ -134,6 +172,12 @@ static std::wstring safe_fname_to_string(uevr::API::FName* fname) {
     try { return fname->to_string(); } catch (...) { return L""; }
 }
 
+// Once we find the UEnum::Names offset on one enum, all other enums in the
+// same game use the same layout. Cache it to avoid rescanning 8 offsets per
+// enum — matters for full dumps (1000+ enums) where the per-enum cost
+// otherwise blows the per-batch game-thread budget.
+static std::atomic<int32_t> g_uenum_names_offset{-1};
+
 static std::vector<UEnumEntry> try_dump_uenum_names(uevr::API::UEnum* uenum) {
     std::vector<UEnumEntry> out;
     if (!uenum) return out;
@@ -142,6 +186,31 @@ static std::vector<UEnumEntry> try_dump_uenum_names(uevr::API::UEnum* uenum) {
     // Range covers UE4.26–UE5.3; earlier versions used a TMap and are unsupported.
     static constexpr int kCandidateOffsets[] = { 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60 };
     constexpr size_t kEntrySize = 16; // FName(8) + int64(8), 8-byte aligned
+
+    // Fast path: reuse the cached offset. Each enum's Names TArray lives at
+    // the same fixed offset within the UEnum layout for a given engine build.
+    int32_t cached_off = g_uenum_names_offset.load(std::memory_order_acquire);
+    if (cached_off >= 0) {
+        auto base = reinterpret_cast<uint8_t*>(uenum) + cached_off;
+        if (probe_mem_readable(base, sizeof(TArrayLike))) {
+            TArrayLike arr{};
+            if (seh_read_tarray(base, &arr)
+                && arr.data && arr.count > 0 && arr.count <= 4096
+                && arr.capacity >= arr.count
+                && probe_mem_readable(arr.data, (size_t)arr.count * kEntrySize)) {
+                out.reserve((size_t)arr.count);
+                for (int i = 0; i < arr.count; ++i) {
+                    auto e = reinterpret_cast<uint8_t*>(arr.data) + (size_t)i * kEntrySize;
+                    auto name_w = safe_fname_to_string(reinterpret_cast<uevr::API::FName*>(e));
+                    int64_t value = 0;
+                    seh_read_int64(e + 8, &value);
+                    out.push_back({ JsonHelpers::wide_to_utf8(name_w), value });
+                }
+                return out;
+            }
+        }
+        // Cached offset didn't validate on this enum — fall through to rescan.
+    }
 
     for (int off : kCandidateOffsets) {
         auto base = reinterpret_cast<uint8_t*>(uenum) + off;
@@ -171,7 +240,8 @@ static std::vector<UEnumEntry> try_dump_uenum_names(uevr::API::UEnum* uenum) {
         auto first_name = safe_fname_to_string(reinterpret_cast<uevr::API::FName*>(arr.data));
         if (first_name.empty()) continue;
 
-        // Good offset — collect all entries.
+        // Good offset — cache for subsequent enums in this session, then collect.
+        g_uenum_names_offset.store(off, std::memory_order_release);
         out.reserve((size_t)arr.count);
         for (int i = 0; i < arr.count; ++i) {
             auto e = reinterpret_cast<uint8_t*>(arr.data) + (size_t)i * kEntrySize;
