@@ -53,6 +53,35 @@ if (args.Length > 0)
             Console.WriteLine(task.GetAwaiter().GetResult());
             return 0;
         }
+        case "setup-game":
+        {
+            if (args.Length < 2) { Console.Error.WriteLine("usage: setup-game <gameExe>"); return 2; }
+            Console.WriteLine(UevrMcp.SetupTools.SetupGame(args[1]).GetAwaiter().GetResult());
+            return 0;
+        }
+        case "stop-game":
+        {
+            if (args.Length < 2) { Console.Error.WriteLine("usage: stop-game <gameExe>"); return 2; }
+            Console.WriteLine(UevrMcp.ReadinessTools.StopGame(args[1]).GetAwaiter().GetResult());
+            return 0;
+        }
+        case "wait-plugin":
+        {
+            int timeout = args.Length > 1 && int.TryParse(args[1], out var t) ? t : 30000;
+            Console.WriteLine(UevrMcp.ReadinessTools.WaitForPlugin(timeout).GetAwaiter().GetResult());
+            return 0;
+        }
+        case "dump-ue-project":
+        {
+            // args: dump-ue-project <outDir> [projectName] [modules] [engineAssoc]
+            if (args.Length < 2) { Console.Error.WriteLine("usage: dump-ue-project <outDir> [projectName] [modules] [engineAssoc]"); return 2; }
+            var outDir = args[1];
+            var projectName = args.Length > 2 && args[2] != "-" ? args[2] : null;
+            var modules = args.Length > 3 && args[3] != "-" ? args[3] : null;
+            var engineAssoc = args.Length > 4 ? args[4] : "4.26";
+            Console.WriteLine(UevrMcp.UhtSdkTools.DumpUeProject(outDir, projectName, modules, engineAssoc).GetAwaiter().GetResult());
+            return 0;
+        }
         case "ps-resolve":
         {
             if (args.Length < 2) { Console.Error.WriteLine("usage: ps-resolve <exePath> [resolvers]"); return 2; }

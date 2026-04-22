@@ -81,8 +81,31 @@ static bool seh_read_ptr(const void* src, void** dst) noexcept
 
 static const int32_t kFuncPtrRange[] = {
     0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8,
-    0xB0, 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0
+    0xB0, 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0,
+    0xF8, 0x100, 0x108, 0x110, 0x118, 0x120
 };
+
+// Validate data[0] is a plausible EX_* opcode. Real UE bytecode starts in
+// 0x00–0x6B (EExprToken). Values 0x80+ definitely aren't opcodes; values
+// 0x6C–0x7F are unused / reserved. Reject candidate offsets where the first
+// byte doesn't parse as a valid opcode — that filters out false-positives
+// where the TArray-shape check passes on non-Script data (e.g. some internal
+// table whose pointer happens to look like a valid buffer).
+static bool seh_read_byte(const void* src, uint8_t* out) noexcept
+{
+    __try { *out = *reinterpret_cast<const uint8_t*>(src); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool is_plausible_bytecode(const void* data, int32_t size) noexcept
+{
+    if (size <= 0 || !data) return true; // empty script is always valid
+    uint8_t b0 = 0;
+    if (!seh_read_byte(data, &b0)) return false;
+    // EX_Max is 0x7F in UE5, 0x6F in UE4.26. Accept anything < 0x80 since the
+    // two ranges differ and we don't know which UE version we're on.
+    return b0 < 0x80;
+}
 
 static int32_t probe_script_offset(void* func_base) noexcept
 {
@@ -111,6 +134,8 @@ static int32_t probe_script_offset(void* func_base) noexcept
         if (arr.count > 0) {
             if (!arr.data) continue;
             if (!page_readable(arr.data, static_cast<size_t>(arr.count))) continue;
+            // First-byte validity: reject if not a known EX_ opcode range.
+            if (!is_plausible_bytecode(arr.data, arr.count)) continue;
         }
 
         return script_off;

@@ -1145,4 +1145,3 @@ IDA Pro path:
     static string Ok(object payload) => JsonSerializer.Serialize(new { ok = true, data = payload }, JsonOpts);
     static string Err(string msg) => JsonSerializer.Serialize(new { ok = false, error = msg }, JsonOpts);
 }
-}

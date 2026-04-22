@@ -635,18 +635,26 @@ void register_routes(httplib::Server& server) {
             combined["probes"].push_back(KismetDisasm::diagnostics());
         }
 
-        // Engine-version hint. No direct version fn in UEVR API, so we infer
-        // from a couple of UE5-only class markers:
-        //  - PrimaryAssetLabel exists from UE4.25 but is more reliable on UE5
-        //  - DoubleProperty was added in UE5 (double-precision property class)
-        //  - Vector3fConst opcode (0x41) is UE5-only, but we'd need a Blueprint
-        //    to see it.
-        // Cheap and reliable: look for DoubleProperty class by name.
+        // Engine-version hint. No direct version fn in UEVR API, so we check
+        // a UE5-only class marker. DoubleProperty existed in UE 4.25+ so
+        // doesn't discriminate. LargeWorldCoordinates and Nanite types are
+        // genuinely UE5-only.
         auto& api = uevr::API::get();
         std::string version_hint = "unknown";
         if (api) {
-            auto dprop = api->find_uobject<uevr::API::UStruct>(L"Class /Script/CoreUObject.DoubleProperty");
-            version_hint = dprop ? "UE5" : "UE4";
+            // ChaosFlesh / Nanite / LargeWorldCoordinatesReal-adjacent types
+            // are UE5 exclusives. Probe a handful; if any exists, call it UE5.
+            const wchar_t* ue5_markers[] = {
+                L"Class /Script/NaniteDisplacedMesh.NaniteDisplacedMesh",
+                L"Class /Script/Engine.WorldPartition",
+                L"ScriptStruct /Script/CoreUObject.LargeWorldCoordinatesReal",
+                L"Class /Script/GeometryCollectionEngine.GeometryCollectionRoot",
+            };
+            bool is_ue5 = false;
+            for (const wchar_t* m : ue5_markers) {
+                if (api->find_uobject<uevr::API::UStruct>(m) != nullptr) { is_ue5 = true; break; }
+            }
+            version_hint = is_ue5 ? "UE5" : "UE4";
         }
         combined["engineVersionHint"] = version_hint;
 
