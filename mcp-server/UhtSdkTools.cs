@@ -859,6 +859,20 @@ public static class UhtSdkTools
         return fullName.Substring(start, end - start);
     }
 
+    // /Game/ BP content uses a different fullName shape:
+    //   "BlueprintGeneratedClass /Game/UI/Common/MenuCursor/UI_BP_BaseCursor.UI_BP_BaseCursor_C"
+    // Return a synthetic module name for these so the emit can group them
+    // under a single "Game" pseudo-module. When includeGameContent=false
+    // these classes are skipped entirely (the default — game content isn't
+    // usable as a UE C++ editor project module without BP reinstancing).
+    static string? GameModuleFromFullName(string fullName)
+    {
+        const string marker = "/Game/";
+        int idx = fullName.IndexOf(marker, StringComparison.Ordinal);
+        if (idx < 0) return null;
+        return "Game";
+    }
+
     // ─── Main tool ─────────────────────────────────────────────────────
 
     [McpServerTool(Name = "uevr_dump_uht_sdk")]
@@ -1093,9 +1107,11 @@ public static class UhtSdkTools
         [Description("Project name (affects .uproject name and Target.cs class names). Default: inferred from first discovered module.")] string? projectName = null,
         [Description("Only emit these modules (comma-separated). Default: every /Script/ module with at least one type.")] string? modules = null,
         [Description("Engine association written into .uproject (e.g. '4.26', '5.3'). Default: '4.26'.")] string engineAssociation = "4.26",
-        [Description("Skip CoreUObject/Engine/UMG engine modules in the Source tree (but keep them in dependency lists). Default true.")] bool skipEngineModules = true)
+        [Description("Skip CoreUObject/Engine/UMG engine modules in the Source tree (but keep them in dependency lists). Default true.")] bool skipEngineModules = true,
+        [Description("Include UFunction enumeration + Kismet bytecode previews. 2-3× slower per batch. Default false.")] bool methods = false,
+        [Description("Include BP-generated classes from /Game/ content. Emitted into a synthetic 'Game' module. Brings in BP widgets, BP actors, UberGraph functions with Kismet bytecode — but the output is NOT a valid UE C++ editor project for those classes (Blueprints can't be reinstanced from headers alone). Best used with methods=true for Kismet preview capture.")] bool includeGameContent = false)
     {
-        using var doc = await DumpTools.FetchReflectionPublic(filter: null, methods: false, enums: true);
+        using var doc = await DumpTools.FetchReflectionPublic(filter: null, methods: methods, enums: true);
         if (doc.RootElement.TryGetProperty("error", out var err))
             return JsonSerializer.Serialize(new { ok = false, error = err.ToString() }, JsonOpts);
 
@@ -1115,6 +1131,8 @@ public static class UhtSdkTools
             var full = t.TryGetProperty("fullName", out var fn) ? fn.GetString() : null;
             if (string.IsNullOrEmpty(full)) return;
             var mod = ModuleFromFullName(full!);
+            if (mod is null && includeGameContent)
+                mod = GameModuleFromFullName(full!);
             if (mod is null) return;
             if (skipEngineModules && IsEngineModule(mod)) return;
             if (!moduleTypes.TryGetValue(mod, out var list))

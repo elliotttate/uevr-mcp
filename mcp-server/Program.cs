@@ -82,13 +82,34 @@ if (args.Length > 0)
         }
         case "dump-ue-project":
         {
-            // args: dump-ue-project <outDir> [projectName] [modules] [engineAssoc]
-            if (args.Length < 2) { Console.Error.WriteLine("usage: dump-ue-project <outDir> [projectName] [modules] [engineAssoc]"); return 2; }
+            // args: dump-ue-project <outDir> [projectName] [modules] [engineAssoc] [methods:0|1] [gameContent:0|1]
+            if (args.Length < 2) { Console.Error.WriteLine("usage: dump-ue-project <outDir> [projectName] [modules] [engineAssoc] [methods:0|1] [gameContent:0|1]"); return 2; }
             var outDir = args[1];
             var projectName = args.Length > 2 && args[2] != "-" ? args[2] : null;
             var modules = args.Length > 3 && args[3] != "-" ? args[3] : null;
             var engineAssoc = args.Length > 4 ? args[4] : "4.26";
-            Console.WriteLine(UevrMcp.UhtSdkTools.DumpUeProject(outDir, projectName, modules, engineAssoc).GetAwaiter().GetResult());
+            bool methods = args.Length > 5 && (args[5] == "1" || args[5].Equals("true", StringComparison.OrdinalIgnoreCase));
+            bool gameContent = args.Length > 6 && (args[6] == "1" || args[6].Equals("true", StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine(UevrMcp.UhtSdkTools.DumpUeProject(outDir, projectName, modules, engineAssoc, skipEngineModules: true, methods: methods, includeGameContent: gameContent).GetAwaiter().GetResult());
+            return 0;
+        }
+        case "dump-usmap":
+        {
+            // args: dump-usmap <outPath> [filter] [compression]
+            if (args.Length < 2) { Console.Error.WriteLine("usage: dump-usmap <outPath> [filter] [compression]"); return 2; }
+            var outPath = args[1];
+            var filter = args.Length > 2 && args[2] != "-" ? args[2] : null;
+            var compression = args.Length > 3 ? args[3] : "none";
+            Console.WriteLine(UevrMcp.DumpTools.DumpUsmap(outPath, filter, compression).GetAwaiter().GetResult());
+            return 0;
+        }
+        case "dump-bn-bundle":
+        {
+            // args: dump-bn-bundle <outDir> [filter]
+            if (args.Length < 2) { Console.Error.WriteLine("usage: dump-bn-bundle <outDir> [filter]"); return 2; }
+            var outDir = args[1];
+            var filter = args.Length > 2 && args[2] != "-" ? args[2] : null;
+            Console.WriteLine(UevrMcp.ReverseEngineeringTools.DumpBinaryNinjaIdaBundle(outDir, filter, pretty: true).GetAwaiter().GetResult());
             return 0;
         }
         case "ps-resolve":
