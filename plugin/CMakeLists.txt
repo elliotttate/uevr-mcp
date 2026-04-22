@@ -118,3 +118,54 @@ set_target_properties(uevr_mcp PROPERTIES
     OUTPUT_NAME "uevr_mcp"
     SUFFIX ".dll"
 )
+
+# ── Dumper-7 (vendored, standalone injectable DLL) ──────────────────
+# Upstream: https://github.com/Encryqed/Dumper-7 (MIT).
+# Vendored under external/Dumper-7/ — built as its own DLL that the MCP tools
+# inject into a running UE process. Entry point is external/Dumper-7/main.cpp,
+# which restores the stock "auto-dump on DllMain" behaviour (the fork we
+# referenced had replaced it with a UEVR plugin wrapper — we don't want that).
+
+file(GLOB DUMPER7_CPP CONFIGURE_DEPENDS external/Dumper-7/*.cpp)
+file(GLOB DUMPER7_H   CONFIGURE_DEPENDS external/Dumper-7/*.h external/Dumper-7/*.hpp)
+
+add_library(dumper7 SHARED
+    ${DUMPER7_CPP}
+    ${DUMPER7_H}
+    external/Dumper-7/ExternalDependencies/Compression/zstd.c
+    external/Dumper-7/ExternalDependencies/Compression/zstd.h
+    external/Dumper-7/ExternalDependencies/Dumpspace/DSGen.cpp
+    external/Dumper-7/ExternalDependencies/Dumpspace/DSGen.h
+)
+
+target_include_directories(dumper7 PRIVATE
+    external/Dumper-7
+    external/Dumper-7/ExternalDependencies
+    external/Dumper-7/ExternalDependencies/Compression
+    external/Dumper-7/ExternalDependencies/Dumpspace
+    external/Dumper-7/ExternalDependencies/Json
+)
+
+# Dumper-7 uses C++20/23 features; match upstream latest.
+set_target_properties(dumper7 PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    OUTPUT_NAME "dumper7"
+    SUFFIX ".dll"
+)
+
+# zstd.c must be compiled as C, not C++.
+set_source_files_properties(
+    external/Dumper-7/ExternalDependencies/Compression/zstd.c
+    PROPERTIES LANGUAGE C
+)
+
+if(MSVC)
+    target_compile_options(dumper7 PRIVATE /EHsc /bigobj /utf-8 /wd4267 /wd4244 /wd4305 /wd4018 /wd4146)
+    set_target_properties(dumper7 PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    # Note: NOT defining NOMINMAX — Dumper-7's Utils.h/OffsetFinder.h use bare
+    # min()/max() and rely on the Windows.h macros.
+    target_compile_definitions(dumper7 PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+    )
+endif()

@@ -55,4 +55,23 @@ namespace ObjectExplorer {
 
     // Get camera state (position, rotation, FOV)
     json get_camera();
+
+    // Write raw bytes to memory (SEH-guarded). Returns {ok, bytesWritten} or {error}.
+    json write_memory(uintptr_t address, const std::vector<uint8_t>& bytes);
+
+    // Bulk reflection dump — walk GUObjectArray once, collect every UClass/UScriptStruct/UEnum
+    // with its fields+methods. Used by MCP dump_reflection/dump_sdk/dump_usmap tools.
+    // filter: optional substring (case-insensitive) applied to type full names.
+    // include_methods: emit method list per type.
+    // include_enums: emit enums (names + values).
+    json dump_reflection(const std::string& filter, bool include_methods, bool include_enums);
+
+    // Paginated variant: walks GUObjectArray[offset .. offset+limit) in a single
+    // game-thread slice. Returns the batch plus nextOffset/totalCount so the server
+    // can iterate without starving the game thread. Key reason this exists: a single
+    // full-walk blocks the game thread for many seconds on AAA UE5 games, which
+    // breaks UE's internal tick invariants and can crash the render thread.
+    json dump_reflection_batch(int offset, int limit,
+                               const std::string& filter,
+                               bool include_methods, bool include_enums);
 }

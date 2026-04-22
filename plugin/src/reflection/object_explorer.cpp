@@ -7,6 +7,14 @@
 #include <cctype>
 #include <cstring>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 using namespace uevr;
 
 // Case-insensitive substring search
@@ -15,6 +23,167 @@ static bool contains_ci(const std::string& haystack, const std::string& needle) 
         needle.begin(), needle.end(),
         [](char a, char b) { return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); });
     return it != haystack.end();
+}
+
+// ── Recursive property tag builder ──────────────────────────────────
+//
+// Emits a nested JSON tag for a single FProperty, walking inner props for
+// arrays/sets/maps/enums so unversioned-asset parsers (FModel, CUE4Parse,
+// UAssetAPI) get the structure they need:
+//
+//   { "type": "ArrayProperty", "inner": { "type": "StructProperty", "structName": "FVector" } }
+//
+// FMapProperty / FSetProperty key/value/element props are not exposed by
+// UEVR's public API (no wrappers for them), so those emit without inner
+// children — downstream tools fall back to best-effort parsing.
+
+static nlohmann::json build_property_tag(uevr::API::FProperty* prop) {
+    nlohmann::json tag;
+    if (!prop) { tag["type"] = "Unknown"; return tag; }
+
+    auto fc = prop->get_class();
+    if (!fc) { tag["type"] = "Unknown"; return tag; }
+
+    auto type = JsonHelpers::wide_to_utf8(fc->get_fname()->to_string());
+    tag["type"] = type;
+
+    if (type == "StructProperty") {
+        auto sp = reinterpret_cast<uevr::API::FStructProperty*>(prop);
+        auto ss = sp->get_struct();
+        if (ss && ss->get_fname()) {
+            tag["structName"] = JsonHelpers::wide_to_utf8(ss->get_fname()->to_string());
+        }
+    } else if (type == "ArrayProperty") {
+        auto ap = reinterpret_cast<uevr::API::FArrayProperty*>(prop);
+        auto inner = ap->get_inner();
+        if (inner) tag["inner"] = build_property_tag(inner);
+    } else if (type == "EnumProperty") {
+        auto ep = reinterpret_cast<uevr::API::FEnumProperty*>(prop);
+        auto uenum = ep->get_enum();
+        if (uenum && uenum->get_fname()) {
+            tag["enumName"] = JsonHelpers::wide_to_utf8(uenum->get_fname()->to_string());
+        }
+        // Underlying numeric prop — parsers need it to know how many bytes to read.
+        auto underlying = ep->get_underlying_prop();
+        if (underlying) {
+            tag["inner"] = build_property_tag(reinterpret_cast<uevr::API::FProperty*>(underlying));
+        }
+    } else if (type == "BoolProperty") {
+        auto bp = reinterpret_cast<uevr::API::FBoolProperty*>(prop);
+        tag["fieldSize"]  = bp->get_field_size();
+        tag["byteOffset"] = bp->get_byte_offset();
+        tag["byteMask"]   = bp->get_byte_mask();
+        tag["fieldMask"]  = bp->get_field_mask();
+    }
+    // FMapProperty / FSetProperty have no UEVR wrappers — caller emits Unknown inners.
+
+    return tag;
+}
+
+// ── UEnum entry probe ───────────────────────────────────────────────
+//
+// UEnum::Names is a TArray<TPair<FName, int64>> at a version-dependent offset
+// inside UEnum. UEVR's public API doesn't expose it, so we probe candidate
+// offsets and validate heuristically. On success we return the entry list;
+// on failure an empty array and the caller treats it as unknown.
+//
+// Layout tested against UE4.26, UE4.27, UE5.0–5.3. UE4.22- used a TMap instead
+// and is not supported.
+
+struct UEnumEntry { std::string name; int64_t value; };
+struct TArrayLike { void* data; int32_t count; int32_t capacity; };
+
+static bool probe_mem_readable(void* p, size_t size) noexcept {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(p, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    const DWORD bad = PAGE_NOACCESS | PAGE_GUARD;
+    if (mbi.Protect & bad) return false;
+    auto end = reinterpret_cast<uint8_t*>(p) + size;
+    auto region_end = reinterpret_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+    return end <= region_end;
+}
+
+// SEH-only helpers (no C++ objects with destructors allowed in these bodies).
+
+static bool seh_read_u64x2(const void* src, uint64_t* dst0, uint64_t* dst1) noexcept {
+    __try {
+        *dst0 = reinterpret_cast<const uint64_t*>(src)[0];
+        *dst1 = reinterpret_cast<const uint64_t*>(src)[1];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool seh_read_tarray(const void* src, TArrayLike* out) noexcept {
+    __try {
+        std::memcpy(out, src, sizeof(TArrayLike));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool seh_read_int64(const void* src, int64_t* out) noexcept {
+    __try { *out = *reinterpret_cast<const int64_t*>(src); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// Attempt to resolve an FName; wraps the UEVR call in a guard so a bad probe
+// doesn't poison the caller. to_string uses C++ objects internally, so we
+// call it outside SEH after we've already validated with the cheap probes.
+static std::wstring safe_fname_to_string(uevr::API::FName* fname) {
+    // No SEH here — to_string allocates; we just use a C++ try/catch.
+    try { return fname->to_string(); } catch (...) { return L""; }
+}
+
+static std::vector<UEnumEntry> try_dump_uenum_names(uevr::API::UEnum* uenum) {
+    std::vector<UEnumEntry> out;
+    if (!uenum) return out;
+
+    // Candidate offsets for UEnum::Names (TArray<TPair<FName, int64>>).
+    // Range covers UE4.26–UE5.3; earlier versions used a TMap and are unsupported.
+    static constexpr int kCandidateOffsets[] = { 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60 };
+    constexpr size_t kEntrySize = 16; // FName(8) + int64(8), 8-byte aligned
+
+    for (int off : kCandidateOffsets) {
+        auto base = reinterpret_cast<uint8_t*>(uenum) + off;
+        if (!probe_mem_readable(base, sizeof(TArrayLike))) continue;
+
+        TArrayLike arr{};
+        if (!seh_read_tarray(base, &arr)) continue;
+        if (!arr.data || arr.count <= 0 || arr.count > 4096) continue;
+        if (arr.capacity < arr.count) continue;
+        if (!probe_mem_readable(arr.data, (size_t)arr.count * kEntrySize)) continue;
+
+        // Validate first up-to-3 entries: FName fields in reasonable range, int64 value readable.
+        bool plausible = true;
+        int check_n = arr.count < 3 ? arr.count : 3;
+        for (int i = 0; i < check_n; ++i) {
+            auto e = reinterpret_cast<uint8_t*>(arr.data) + (size_t)i * kEntrySize;
+            uint64_t fname_bits = 0, value_bits = 0;
+            if (!seh_read_u64x2(e, &fname_bits, &value_bits)) { plausible = false; break; }
+            int32_t cmp = (int32_t)(fname_bits & 0xFFFFFFFFu);
+            int32_t num = (int32_t)(fname_bits >> 32);
+            if (cmp < 0 || cmp > 0x0A000000) { plausible = false; break; }
+            if (num < 0 || num > 0x00010000) { plausible = false; break; }
+        }
+        if (!plausible) continue;
+
+        // Resolve the first entry's FName to sanity-check the offset.
+        auto first_name = safe_fname_to_string(reinterpret_cast<uevr::API::FName*>(arr.data));
+        if (first_name.empty()) continue;
+
+        // Good offset — collect all entries.
+        out.reserve((size_t)arr.count);
+        for (int i = 0; i < arr.count; ++i) {
+            auto e = reinterpret_cast<uint8_t*>(arr.data) + (size_t)i * kEntrySize;
+            auto name_w = safe_fname_to_string(reinterpret_cast<uevr::API::FName*>(e));
+            int64_t value = 0;
+            seh_read_int64(e + 8, &value);
+            out.push_back({ JsonHelpers::wide_to_utf8(name_w), value });
+        }
+        return out;
+    }
+
+    return out;
 }
 
 namespace ObjectExplorer {
@@ -148,6 +317,50 @@ json enumerate_fields(API::UStruct* ustruct) {
     }
 
     return fields;
+}
+
+// Own-only variant: does not walk supers. Used by the bulk reflection dumper where
+// supers are emitted as their own types and the SDK/USMAP consumers filter by owner
+// anyway — walking supers was 3–5× wasted work on UE hierarchies and pushed per-batch
+// game-thread time past its budget on methods=true dumps.
+static json enumerate_own_methods(API::UStruct* ustruct) {
+    json methods = json::array();
+    if (!ustruct) return methods;
+
+    for (auto child = ustruct->get_children(); child != nullptr; child = child->get_next()) {
+        auto child_cls = child->get_class();
+        if (!child_cls) continue;
+        auto child_cls_name = child_cls->get_fname()->to_string();
+        if (child_cls_name != L"Function") continue;
+
+        auto func = reinterpret_cast<API::UFunction*>(child);
+        json m;
+        m["name"] = JsonHelpers::wide_to_utf8(func->get_fname()->to_string());
+
+        json params = json::array();
+        std::string return_type;
+        for (auto param = func->get_child_properties(); param != nullptr; param = param->get_next()) {
+            auto pc = param->get_class();
+            if (!pc) continue;
+            auto pc_name = JsonHelpers::wide_to_utf8(pc->get_fname()->to_string());
+            if (pc_name.find("Property") == std::string::npos) continue;
+
+            auto fparam = reinterpret_cast<API::FProperty*>(param);
+            auto pname = JsonHelpers::wide_to_utf8(fparam->get_fname()->to_string());
+            if (fparam->is_return_param()) { return_type = pc_name; continue; }
+
+            json p;
+            p["name"] = pname;
+            p["type"] = pc_name;
+            if (fparam->is_out_param()) p["out"] = true;
+            params.push_back(p);
+        }
+        m["params"] = params;
+        if (!return_type.empty()) m["returnType"] = return_type;
+        if (auto on = ustruct->get_fname()) m["owner"] = JsonHelpers::wide_to_utf8(on->to_string());
+        methods.push_back(m);
+    }
+    return methods;
 }
 
 json enumerate_methods(API::UStruct* ustruct) {
@@ -969,6 +1182,281 @@ json get_camera() {
     }
 
     return result;
+}
+
+// ── Bulk reflection dump ────────────────────────────────────────────
+//
+// Walks GUObjectArray once, classifies every object as UClass / UScriptStruct / UEnum,
+// and emits a consolidated JSON schema. Drives MCP tools that produce USMAPs,
+// C++ SDK headers, or raw JSON dumps — done server-side so clients don't need
+// thousands of round-trips.
+//
+// Core worker: walks [begin, end) of GUObjectArray into the provided json arrays.
+// Kept as a free function so dump_reflection (unbounded) and dump_reflection_batch
+// (paginated) share exactly the same per-object logic.
+// Pointer-compare gate: look up the well-known meta-type UClass pointers once per
+// dump and check object->get_class() == one of them. A pointer compare is O(1);
+// the old path called FName::to_string per object (~1ms each × 4000 = 4s of
+// per-batch game-thread time spent just classifying).
+struct KindGate {
+    uevr::API::UStruct* c_class = nullptr;
+    uevr::API::UStruct* c_bp_class = nullptr;
+    uevr::API::UStruct* c_anim_bp_class = nullptr;
+    uevr::API::UStruct* c_widget_bp_class = nullptr;
+    uevr::API::UStruct* c_script_struct = nullptr;
+    uevr::API::UStruct* c_user_struct = nullptr;
+    uevr::API::UStruct* c_enum = nullptr;
+    uevr::API::UStruct* c_user_enum = nullptr;
+};
+
+static KindGate build_kind_gate() {
+    auto& api = uevr::API::get();
+    KindGate g{};
+    if (!api) return g;
+    g.c_class            = api->find_uobject<uevr::API::UStruct>(L"Class /Script/CoreUObject.Class");
+    g.c_bp_class         = api->find_uobject<uevr::API::UStruct>(L"Class /Script/Engine.BlueprintGeneratedClass");
+    g.c_anim_bp_class    = api->find_uobject<uevr::API::UStruct>(L"Class /Script/Engine.AnimBlueprintGeneratedClass");
+    g.c_widget_bp_class  = api->find_uobject<uevr::API::UStruct>(L"Class /Script/UMG.WidgetBlueprintGeneratedClass");
+    g.c_script_struct    = api->find_uobject<uevr::API::UStruct>(L"Class /Script/CoreUObject.ScriptStruct");
+    g.c_user_struct      = api->find_uobject<uevr::API::UStruct>(L"Class /Script/Engine.UserDefinedStruct");
+    g.c_enum             = api->find_uobject<uevr::API::UStruct>(L"Class /Script/CoreUObject.Enum");
+    g.c_user_enum        = api->find_uobject<uevr::API::UStruct>(L"Class /Script/Engine.UserDefinedEnum");
+    return g;
+}
+
+static void dump_range(int begin, int end,
+                       const std::string& filter,
+                       bool include_methods, bool include_enums,
+                       json& classes, json& structs, json& enums,
+                       int& total_scanned, int& total_matched, int& object_errors)
+{
+    auto array = API::FUObjectArray::get();
+    if (!array) return;
+
+    auto gate = build_kind_gate();
+
+    for (int i = begin; i < end; ++i) {
+        // Whole-object guard: GUObjectArray can contain objects in weird intermediate
+        // states (half-destructed, being GC'd, non-standard vtables). One bad entry
+        // must not abort the whole dump.
+        try {
+        auto obj = array->get_object(i);
+        if (!obj) continue;
+        ++total_scanned;
+
+        auto cls = reinterpret_cast<uevr::API::UStruct*>(obj->get_class());
+        if (!cls) continue;
+        // Pointer compare vs cached meta-class UClass objects. O(1) per check vs
+        // O(FName-to-string) for the previous path.
+        bool is_class  = (cls == gate.c_class || cls == gate.c_bp_class
+                       || cls == gate.c_anim_bp_class || cls == gate.c_widget_bp_class);
+        bool is_struct = (cls == gate.c_script_struct || cls == gate.c_user_struct);
+        bool is_enum   = (cls == gate.c_enum || cls == gate.c_user_enum);
+        if (!is_class && !is_struct && !(include_enums && is_enum)) continue;
+
+        auto full_name_utf8 = JsonHelpers::wide_to_utf8(obj->get_full_name());
+        if (!filter.empty() && !contains_ci(full_name_utf8, filter)) continue;
+        ++total_matched;
+
+        if (is_enum) {
+            json e;
+            auto uenum = reinterpret_cast<API::UEnum*>(obj);
+            e["name"] = JsonHelpers::wide_to_utf8(uenum->get_fname()->to_string());
+            e["fullName"] = full_name_utf8;
+            e["address"] = JsonHelpers::address_to_string(uenum);
+
+            // Memory-probe UEnum::Names — UEVR's public API doesn't expose it, but
+            // the TArray layout at a version-dependent offset is stable enough to
+            // detect with validation. Failure returns empty and downstream tools
+            // treat the enum as opaque.
+            auto entries = try_dump_uenum_names(uenum);
+            if (!entries.empty()) {
+                json arr = json::array();
+                for (auto& en : entries) arr.push_back({{"name", en.name}, {"value", en.value}});
+                e["entries"] = arr;
+            }
+            enums.push_back(e);
+            continue;
+        }
+
+        auto ustruct = reinterpret_cast<API::UStruct*>(obj);
+        json t;
+        auto struct_name_utf8 = JsonHelpers::wide_to_utf8(ustruct->get_fname()->to_string());
+        t["name"] = struct_name_utf8;
+        t["fullName"] = full_name_utf8;
+        t["address"] = JsonHelpers::address_to_string(ustruct);
+        t["propertiesSize"] = ustruct->get_properties_size();
+        if (auto super = ustruct->get_super()) {
+            if (super->get_fname()) {
+                t["super"] = JsonHelpers::wide_to_utf8(super->get_fname()->to_string());
+            }
+        }
+
+        // Emit "own" fields only (not walking supers) so USMAP schemas are correctly
+        // scoped. Attach the full recursive property tag — this is what USMAP / FModel
+        // / CUE4Parse need to parse unversioned assets. Per-field try/catch so a single
+        // corrupt property doesn't poison the whole type or the rest of the dump.
+        json own_fields = json::array();
+        int field_errors = 0;
+        try {
+            for (auto field = ustruct->get_child_properties(); field != nullptr; field = field->get_next()) {
+                try {
+                    auto fc = field->get_class();
+                    if (!fc) continue;
+                    auto class_name = JsonHelpers::wide_to_utf8(fc->get_fname()->to_string());
+                    if (class_name.find("Property") == std::string::npos) continue;
+
+                    auto fprop = reinterpret_cast<API::FProperty*>(field);
+                    json f;
+                    f["name"] = JsonHelpers::wide_to_utf8(fprop->get_fname()->to_string());
+                    f["type"] = class_name;
+                    f["offset"] = fprop->get_offset();
+                    f["owner"] = struct_name_utf8;
+                    f["tag"] = build_property_tag(fprop);
+                    own_fields.push_back(f);
+                } catch (...) {
+                    ++field_errors;
+                }
+            }
+        } catch (...) {
+            t["fieldsError"] = "exception while walking child_properties chain";
+        }
+        t["fields"] = own_fields;
+        if (field_errors > 0) t["fieldErrors"] = field_errors;
+        if (include_methods) {
+            try { t["methods"] = enumerate_own_methods(ustruct); }
+            catch (...) { t["methodsError"] = "exception while enumerating methods"; }
+        }
+
+        if (is_class) classes.push_back(t);
+        else structs.push_back(t);
+        } // try
+        catch (...) { ++object_errors; }
+    }
+}
+
+json dump_reflection(const std::string& filter, bool include_methods, bool include_enums) {
+    auto& api = API::get();
+    if (!api) return json{{"error", "API not available"}};
+    auto array = API::FUObjectArray::get();
+    if (!array) return json{{"error", "GUObjectArray not available"}};
+
+    int count = array->get_object_count();
+    json classes = json::array(), structs = json::array(), enums = json::array();
+    int total_scanned = 0, total_matched = 0, object_errors = 0;
+
+    dump_range(0, count, filter, include_methods, include_enums,
+               classes, structs, enums,
+               total_scanned, total_matched, object_errors);
+
+    json result;
+    result["classes"] = classes;
+    result["structs"] = structs;
+    if (include_enums) result["enums"] = enums;
+    result["stats"] = {
+        {"totalScanned", total_scanned},
+        {"totalMatched", total_matched},
+        {"classCount",  classes.size()},
+        {"structCount", structs.size()},
+        {"enumCount",   enums.size()},
+        {"objectErrors", object_errors}
+    };
+    return result;
+}
+
+json dump_reflection_batch(int offset, int limit,
+                           const std::string& filter,
+                           bool include_methods, bool include_enums)
+{
+    auto& api = API::get();
+    if (!api) return json{{"error", "API not available"}};
+    auto array = API::FUObjectArray::get();
+    if (!array) return json{{"error", "GUObjectArray not available"}};
+
+    int count = array->get_object_count();
+    if (offset < 0) offset = 0;
+    if (limit <= 0) limit = 500;
+    int end = offset + limit;
+    if (end > count) end = count;
+
+    json classes = json::array(), structs = json::array(), enums = json::array();
+    int total_scanned = 0, total_matched = 0, object_errors = 0;
+
+    dump_range(offset, end, filter, include_methods, include_enums,
+               classes, structs, enums,
+               total_scanned, total_matched, object_errors);
+
+    json result;
+    result["classes"] = classes;
+    result["structs"] = structs;
+    if (include_enums) result["enums"] = enums;
+    result["offset"] = offset;
+    result["nextOffset"] = end;   // caller terminates when nextOffset == totalCount
+    result["totalCount"] = count;
+    result["done"] = (end >= count);
+    result["batchStats"] = {
+        {"scanned",  total_scanned},
+        {"matched",  total_matched},
+        {"errors",   object_errors},
+        {"classes",  classes.size()},
+        {"structs",  structs.size()},
+        {"enums",    enums.size()}
+    };
+    return result;
+}
+
+// ── Raw memory write ────────────────────────────────────────────────
+//
+// SEH-guarded memcpy into an arbitrary process address. Callers are trusted —
+// the MCP server is localhost-only and already exposes arbitrary reads, so
+// exposing writes is symmetric. VirtualProtect is NOT called: the MCP is a
+// debugging/modding surface, not a generic patcher. For code patches use a
+// Lua helper that toggles page protection itself.
+
+static bool seh_memcpy(void* dst, const void* src, size_t n) noexcept {
+    __try {
+        std::memcpy(dst, src, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+json write_memory(uintptr_t address, const std::vector<uint8_t>& bytes) {
+    if (!address) return json{{"error", "Null address"}};
+    if (bytes.empty()) return json{{"error", "Empty byte buffer"}};
+    if (bytes.size() > (1u << 20)) return json{{"error", "Refusing to write > 1MiB in a single call"}};
+
+    void* dst = reinterpret_cast<void*>(address);
+
+    // Query page protection; if not writable, flip it temporarily. Use PAGE_EXECUTE_READWRITE
+    // so code pages also work (common use case: NOP-out a signature).
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(dst, &mbi, sizeof(mbi))) {
+        return json{{"error", "VirtualQuery failed"}, {"err", (uint64_t)GetLastError()}};
+    }
+
+    DWORD old_protect = 0;
+    const DWORD writable_mask = PAGE_READWRITE | PAGE_WRITECOPY
+                              | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    bool changed = false;
+    if ((mbi.Protect & writable_mask) == 0) {
+        if (!VirtualProtect(dst, bytes.size(), PAGE_EXECUTE_READWRITE, &old_protect)) {
+            return json{{"error", "VirtualProtect failed"}, {"err", (uint64_t)GetLastError()}};
+        }
+        changed = true;
+    }
+
+    bool ok = seh_memcpy(dst, bytes.data(), bytes.size());
+
+    if (changed) {
+        DWORD ignore = 0;
+        VirtualProtect(dst, bytes.size(), old_protect, &ignore);
+        FlushInstructionCache(GetCurrentProcess(), dst, bytes.size());
+    }
+
+    if (!ok) return json{{"error", "Access violation during write"}};
+    return json{{"ok", true}, {"address", JsonHelpers::address_to_string(address)}, {"bytesWritten", bytes.size()}};
 }
 
 } // namespace ObjectExplorer

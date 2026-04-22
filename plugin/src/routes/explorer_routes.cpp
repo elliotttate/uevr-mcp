@@ -484,6 +484,140 @@ void register_routes(httplib::Server& server) {
 
         send_json(res, result);
     });
+
+    // POST /api/explorer/memory — Raw byte write. Body: {address: "0xHEX", bytes: "DEADBEEF..."}
+    // where bytes is a hex string (with or without separators). Temporarily flips page protection
+    // to RWX for the write so code patches work, restores afterwards, flushes instruction cache.
+    server.Post("/api/explorer/memory", [](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); } catch (...) {
+            send_json(res, json{{"error", "Invalid JSON body"}}, 400);
+            return;
+        }
+
+        auto address = JsonHelpers::string_to_address(body.value("address", ""));
+        if (address == 0) {
+            send_json(res, json{{"error", "Missing or invalid 'address'"}}, 400);
+            return;
+        }
+
+        // Accept bytes as a hex string ("DE AD BE EF" or "DEADBEEF") or a JSON array of ints.
+        std::vector<uint8_t> bytes;
+        if (body.contains("bytes") && body["bytes"].is_string()) {
+            auto s = body["bytes"].get<std::string>();
+            std::string cleaned;
+            cleaned.reserve(s.size());
+            for (char c : s) {
+                if (std::isxdigit((unsigned char)c)) cleaned.push_back(c);
+                else if (c == ' ' || c == ',' || c == ':' || c == '-' || c == '\t' || c == '\n' || c == '\r') continue;
+                else {
+                    send_json(res, json{{"error", std::string("Unexpected character in hex: '") + c + "'"}}, 400);
+                    return;
+                }
+            }
+            if (cleaned.size() % 2 != 0) {
+                send_json(res, json{{"error", "Hex string length must be even"}}, 400);
+                return;
+            }
+            bytes.reserve(cleaned.size() / 2);
+            for (size_t i = 0; i < cleaned.size(); i += 2) {
+                bytes.push_back((uint8_t)std::stoul(cleaned.substr(i, 2), nullptr, 16));
+            }
+        } else if (body.contains("bytes") && body["bytes"].is_array()) {
+            for (const auto& b : body["bytes"]) {
+                if (!b.is_number_integer()) {
+                    send_json(res, json{{"error", "bytes array must contain integers"}}, 400);
+                    return;
+                }
+                int v = b.get<int>();
+                if (v < 0 || v > 255) {
+                    send_json(res, json{{"error", "byte value out of range 0..255"}}, 400);
+                    return;
+                }
+                bytes.push_back((uint8_t)v);
+            }
+        } else {
+            send_json(res, json{{"error", "Missing 'bytes' (hex string or int array)"}}, 400);
+            return;
+        }
+
+        PipeServer::get().log("Explorer: write " + std::to_string(bytes.size()) +
+                              " bytes @ " + JsonHelpers::address_to_string(address));
+
+        auto result = GameThreadQueue::get().submit_and_wait([address, bytes]() {
+            return ObjectExplorer::write_memory(address, bytes);
+        });
+        send_json(res, result);
+    });
+
+    // GET /api/dump/reflection — Walk GUObjectArray and emit every UClass/UScriptStruct/UEnum
+    // with fields and (optionally) methods. Powers the dump_reflection / dump_sdk / dump_usmap
+    // MCP tools. Query params:
+    //   filter: case-insensitive substring applied to full names
+    //   methods: "true"/"false" (default true)
+    //   enums:   "true"/"false" (default true)
+    server.Get("/api/dump/reflection", [](const httplib::Request& req, httplib::Response& res) {
+        auto filter = req.has_param("filter") ? req.get_param_value("filter") : std::string();
+        auto parse_bool = [&](const std::string& key, bool def) {
+            if (!req.has_param(key)) return def;
+            auto v = req.get_param_value(key);
+            return !(v == "false" || v == "0" || v == "no");
+        };
+        bool include_methods = parse_bool("methods", true);
+        bool include_enums   = parse_bool("enums",   true);
+
+        PipeServer::get().log("Dump: reflection filter='" + filter + "' methods=" +
+                              (include_methods ? "y" : "n") + " enums=" + (include_enums ? "y" : "n"));
+
+        // Reflection walk on big games can run several minutes (methods+enums across
+        // every UClass in GUObjectArray). 5 minutes covers even large AAA UE5 titles;
+        // callers can filter with the `filter` param to shrink scope.
+        // NOTE: Prefer /api/dump/reflection_batch for large games — a single long
+        // game-thread slice starves UE's tick and can crash the render thread.
+        auto result = GameThreadQueue::get().submit_and_wait(
+            [filter, include_methods, include_enums]() {
+                return ObjectExplorer::dump_reflection(filter, include_methods, include_enums);
+            },
+            300000);
+        send_json(res, result);
+    });
+
+    // GET /api/dump/reflection_batch?offset=&limit=&filter=&methods=&enums=
+    //
+    // Paginated reflection walk — each call processes at most `limit` objects
+    // from GUObjectArray starting at `offset`. The game thread yields between
+    // batches, so multi-second dumps don't block UE's tick and crash the render
+    // thread. Server loops until `done`=true.
+    server.Get("/api/dump/reflection_batch", [](const httplib::Request& req, httplib::Response& res) {
+        int offset = 0, limit = 500;
+        if (req.has_param("offset")) try { offset = std::stoi(req.get_param_value("offset")); } catch (...) {}
+        if (req.has_param("limit"))  try { limit  = std::stoi(req.get_param_value("limit"));  } catch (...) {}
+        auto filter = req.has_param("filter") ? req.get_param_value("filter") : std::string();
+        auto parse_bool = [&](const std::string& key, bool def) {
+            if (!req.has_param(key)) return def;
+            auto v = req.get_param_value(key);
+            return !(v == "false" || v == "0" || v == "no");
+        };
+        bool include_methods = parse_bool("methods", true);
+        bool include_enums   = parse_bool("enums",   true);
+
+        // Clamp — each batch must fit comfortably in a single game-thread slice.
+        // 2000 is aggressive but tolerable on fast machines; default 500 is safe.
+        if (limit < 1) limit = 1;
+        if (limit > 5000) limit = 5000;
+
+        // Per-batch timeout: methods=true does significantly more work per class
+        // (walks every UFunction's parameter chain up the super hierarchy). The
+        // first batch can be extra slow because UE is still registering types.
+        int timeout_ms = include_methods ? 20000 : 10000;
+        auto result = GameThreadQueue::get().submit_and_wait(
+            [offset, limit, filter, include_methods, include_enums]() {
+                return ObjectExplorer::dump_reflection_batch(
+                    offset, limit, filter, include_methods, include_enums);
+            },
+            timeout_ms);
+        send_json(res, result);
+    });
 }
 
 } // namespace ExplorerRoutes

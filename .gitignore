@@ -4,6 +4,9 @@ plugin/build_maponly/
 **/bin/
 **/obj/
 
+# NuGet local package cache (not source)
+.nuget/
+
 # Test / scratch artifacts
 artifacts/
 scratch_disasm.txt

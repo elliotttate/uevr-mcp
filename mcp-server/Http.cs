@@ -8,7 +8,10 @@ namespace UevrMcp;
 static class Http
 {
     static string? _base;
-    static readonly HttpClient Client = new();
+    // Bulk reflection dumps on AAA games can take multiple minutes on the plugin
+    // game-thread. Default HttpClient timeout is 100s — raise it so large-game
+    // dumps don't get killed client-side. Plugin itself caps at 120s per request.
+    static readonly HttpClient Client = new() { Timeout = TimeSpan.FromMinutes(10) };
     static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
