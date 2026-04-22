@@ -1383,6 +1383,12 @@ static void dump_range(int begin, int end,
                     f["offset"] = fprop->get_offset();
                     f["owner"] = struct_name_utf8;
                     f["tag"] = build_property_tag(fprop);
+                    // CPF_* bitmask — consumed by the UHT emitter to derive
+                    // UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, ...)
+                    // specifiers. Emitted as a JSON number (hex string for large
+                    // values would round-trip cleanly but JSON numbers fit all
+                    // known UE5 flag ranges).
+                    f["propertyFlags"] = fprop->get_property_flags();
                     own_fields.push_back(f);
                 } catch (...) {
                     ++field_errors;

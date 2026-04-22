@@ -89,6 +89,12 @@ public static class DumpTools
     // This was added because a full single-slice walk on AAA UE5 games starves
     // UE's tick and crashes the render thread (observed on RoboQuest).
 
+    // Public entry so sibling tools (UhtSdkTools, future Phase 3 project
+    // scaffolder) can share the cached reflection walk rather than hitting
+    // the plugin separately.
+    internal static Task<JsonDocument> FetchReflectionPublic(string? filter, bool methods, bool enums)
+        => FetchReflection(filter, methods, enums);
+
     static async Task<JsonDocument> FetchReflection(string? filter, bool methods, bool enums)
     {
         var key = MakeCacheKey(filter, methods, enums);
