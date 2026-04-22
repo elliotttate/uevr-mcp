@@ -48,18 +48,42 @@ public static class StabilityTools
     // Stability preset — each key maps to a value we think is safest for
     // reflection-only dumping. Comments note the rationale so future games
     // can tune individual entries if needed.
+    //
+    // The preset targets three failure modes we've seen on DX12 AAA games
+    // (Stellar Blade, etc.):
+    //   1. UEVR's D3D monitor thread retries hook installation every ~10s,
+    //      crashing the D3D device mid-render.
+    //   2. UEVR installs a FFakeStereoRenderingHook on FViewport/SceneView,
+    //      which races with the game thread on heavy reflection walks.
+    //   3. UEVR's VR runtime init (OpenXR/OpenVR) holds references that
+    //      don't release cleanly under memory pressure.
+    //
+    // (1) is addressed by uevr_suppress_d3d_monitor at runtime.
+    // (2) is addressed by VR_Compatibility_SceneView + VR_2DScreenMode +
+    //     VR_RenderingMethod=2 (alternating mode, least invasive).
+    // (3) is addressed by Frontend_RequestedRuntime pointing at a non-
+    //     existent DLL so UEVR skips runtime init entirely.
     static readonly (string Key, string Value, string Why)[] StabilityPresets = new[]
     {
-        ("VR_ExtremeCompatibilityMode",      "true",  "UEVR's own 'make this work on broken games' flag"),
-        ("VR_2DScreenMode",                  "true",  "render mono — no stereo hook churn"),
-        ("VR_AsynchronousScan",              "false", "deterministic init order, less race with D3D hook"),
-        ("VR_LoadBlueprintCode",             "false", "no BP injection, fewer moving parts"),
-        ("VR_EnableGUI",                     "false", "no imgui overlay, fewer D3D interactions"),
-        ("VR_ShowFPSOverlay",                "false", "same"),
-        ("VR_ShowStatsOverlay",              "false", "same"),
-        ("VR_UseFMallocSceneViewExtensions", "false", "skip engine-level scene view extension patching"),
-        ("UObjectHook_EnabledAtStartup",     "false", "user can enable later; our plugin accesses UObject via UEVR API directly"),
-        ("FrameworkConfig_MenuOpen",         "false", "don't pop the menu"),
+        ("VR_ExtremeCompatibilityMode",        "true",                  "UEVR's own 'make this work on broken games' flag"),
+        ("VR_2DScreenMode",                    "true",                  "render mono — no stereo hook churn"),
+        ("VR_Compatibility_SceneView",         "true",                  "skip FSceneView / SceneViewExtension hook install"),
+        ("VR_Compatibility_SkipPostInitProperties", "true",             "skip the PostInitProperties hook that fires on every UObject"),
+        ("VR_Compatibility_AHUD",              "true",                  "skip the HUD-specific hook path"),
+        ("VR_RenderingMethod",                 "2",                     "alternating (0=native stereo, 1=synced, 2=alternating) — least intrusive on DX12"),
+        ("VR_AsynchronousScan",                "false",                 "deterministic init order, less race with D3D hook"),
+        ("VR_LoadBlueprintCode",               "false",                 "no BP injection, fewer moving parts"),
+        ("VR_EnableGUI",                       "false",                 "no imgui overlay, fewer D3D interactions"),
+        ("VR_ShowFPSOverlay",                  "false",                 "same"),
+        ("VR_ShowStatsOverlay",                "false",                 "same"),
+        ("VR_UseFMallocSceneViewExtensions",   "false",                 "skip engine-level scene view extension patching"),
+        ("VR_PassDepthToRuntime",              "false",                 "don't send depth to VR runtime (not loaded anyway)"),
+        ("UObjectHook_EnabledAtStartup",       "false",                 "user can enable later; our plugin accesses UObject via UEVR API directly"),
+        ("FrameworkConfig_MenuOpen",           "false",                 "don't pop the menu"),
+        // NOTE: Frontend_RequestedRuntime is deliberately NOT set here. Pointing it
+        // at a non-existent DLL makes UEVR retry runtime loading and hurts stability
+        // on the games it was supposed to help. Leave the user's existing value
+        // (typically openxr_loader.dll) alone.
     };
 
     [McpServerTool(Name = "uevr_write_stability_config")]
