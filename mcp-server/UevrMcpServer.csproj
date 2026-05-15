@@ -6,6 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
     <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+    <!-- Single-file + self-contained publish flags are passed via -p:... on the
+         command line in tools/package-release.ps1. Keeping them out of the csproj
+         so `dotnet run` / `dotnet build` for dev work stays small and fast. -->
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="*-*" />

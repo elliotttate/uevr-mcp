@@ -103,7 +103,16 @@ public static class GuideTools
 
     static string? ResolveAgentMd()
     {
-        var dir = Path.GetDirectoryName(typeof(GuideTools).Assembly.Location);
+        // Single-file release exe has empty Assembly.Location — use ProcessPath.
+        string? startDir;
+        try { startDir = Path.GetDirectoryName(Environment.ProcessPath); }
+        catch { startDir = null; }
+        if (string.IsNullOrEmpty(startDir))
+        {
+            var asm = typeof(GuideTools).Assembly.Location;
+            startDir = string.IsNullOrEmpty(asm) ? AppContext.BaseDirectory : Path.GetDirectoryName(asm);
+        }
+        var dir = startDir;
         while (dir is not null)
         {
             var candidate = Path.Combine(dir, "AGENT.md");

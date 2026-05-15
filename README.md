@@ -21,11 +21,25 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that g
 
 ## Setup
 
-### Prerequisites
+### Quickest path: download the release zip (no build, no SDKs)
+
+Grab `UevrMcp-vX.Y.Z.zip` from the [Releases page](https://github.com/elliotttate/uevr-mcp/releases), unzip it, and run the bundled installer:
+
+```powershell
+cd C:\Tools\UevrMcp-v1.0.0
+.\install.ps1 -GameExe "E:\SteamLibrary\steamapps\common\MyGame\...\MyGame-Win64-Shipping.exe"
+.\tools\quick-dump.ps1 -GameExe "...MyGame-Win64-Shipping.exe" -OutDir C:\dumps\MyGame
+```
+
+The installer downloads `UEVRBackend.dll` from praydog/UEVR, copies `uevr_mcp.dll` into `%APPDATA%\UnrealVRMod\<Game>\plugins\`, and (optionally with `-McpConfig claude-code-user|cursor-user|claude-code-here`) wires up your MCP client. **No .NET SDK, CMake, or Visual Studio install required** — `UevrMcpServer.exe` is a self-contained single-file publish. See [`release/README.md`](release/README.md) for the full release-side quickstart.
+
+### Build from source
+
+Use this path if you want to hack on the plugin or MCP server itself. Prereqs:
 
 - [UEVR](https://github.com/praydog/UEVR) installed and configured for your game
 - [.NET 9+ SDK](https://dotnet.microsoft.com/download/dotnet/9.0) for the MCP server
-- [CMake 3.21+](https://cmake.org) and Visual Studio 2022 Build Tools to compile the plugin (or use a pre-built release)
+- [CMake 3.21+](https://cmake.org) and Visual Studio 2022 Build Tools to compile the plugin
 
 ### 1. Build and install the plugin
 

@@ -4,6 +4,9 @@ plugin/build_maponly/
 **/bin/
 **/obj/
 
+# Release packaging staging + zips
+dist/
+
 # NuGet local package cache (not source)
 .nuget/
 

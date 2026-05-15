@@ -70,10 +70,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$Mcp      = Join-Path $RepoRoot 'mcp-server\bin\Release\net9.0\UevrMcpServer.exe'
 
-if (-not (Test-Path $Mcp)) {
-    throw "UevrMcpServer.exe not built at $Mcp. Run tools\setup.ps1 first."
+# Resolve UevrMcpServer.exe — release zip layout (bin/) or repo dev layout.
+$McpCandidates = @(
+    (Join-Path $RepoRoot 'bin\UevrMcpServer.exe')
+    (Join-Path $RepoRoot 'mcp-server\bin\Release\net9.0\UevrMcpServer.exe')
+    (Join-Path $RepoRoot 'mcp-server\bin\Publish\UevrMcpServer.exe')
+)
+$Mcp = $McpCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $Mcp) {
+    throw "UevrMcpServer.exe not found. Searched:`n  $($McpCandidates -join "`n  ")`nRun tools\setup.ps1 (repo) or .\install.ps1 (release)."
 }
 if (-not (Test-Path $GameExe)) {
     throw "GameExe $GameExe not found."

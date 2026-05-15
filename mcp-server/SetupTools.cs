@@ -40,6 +40,22 @@ public static class SetupTools
         return Path.GetFullPath(Path.Combine(asm, "..", "..", "..", ".."));
     }
 
+    // Directory containing UevrMcpServer.exe — for the release zip layout
+    // (UevrMcpServer.exe + uevr_mcp.dll + UEVRBackend.dll all colocated under bin/).
+    static string ExeDir()
+    {
+        // For single-file publish, AppContext.BaseDirectory is where the host extracted to.
+        // Process.MainModule.FileName is the actual exe path.
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exe))
+                return Path.GetDirectoryName(exe)!;
+        }
+        catch { }
+        return AppContext.BaseDirectory;
+    }
+
     static string? FirstExisting(params string?[] candidates)
     {
         foreach (var c in candidates)
@@ -52,9 +68,13 @@ public static class SetupTools
     {
         var env = Environment.GetEnvironmentVariable("UEVR_MCP_PLUGIN_DLL");
         var root = RepoRoot();
+        var exeDir = ExeDir();
         return FirstExisting(
             overridePath,
             env,
+            // Release zip layout: bin/UevrMcpServer.exe + bin/uevr_mcp.dll
+            Path.Combine(exeDir, "uevr_mcp.dll"),
+            // Repo dev layout
             Path.Combine(root, "plugin", "build", "Release", "uevr_mcp.dll"),
             Path.Combine(root, "plugin", "build_maponly", "Release", "uevr_mcp.dll"));
     }
@@ -62,10 +82,14 @@ public static class SetupTools
     static string? ResolveBackendDll(string? overridePath)
     {
         var env = Environment.GetEnvironmentVariable("UEVR_BACKEND_DLL");
+        var exeDir = ExeDir();
+        // Walk up from exe looking for a release/dev install of UEVRBackend.dll.
         return FirstExisting(
             overridePath,
             env,
-            // The common local UEVR build location on this box (see memory).
+            // Release zip layout
+            Path.Combine(exeDir, "UEVRBackend.dll"),
+            // Common local-build path for repo contributors. Overridable via env.
             @"E:\Github\UEVR\build\bin\uevr\UEVRBackend.dll");
     }
 

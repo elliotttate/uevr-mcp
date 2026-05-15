@@ -31,7 +31,20 @@ public static class PluginReloadTools
 
     static string RepoRoot()
     {
-        var dir = Path.GetDirectoryName(typeof(PluginReloadTools).Assembly.Location);
+        // Single-file release exe has empty Assembly.Location — fall back to ProcessPath.
+        // Release-zip users can't rebuild the plugin from source (no plugin/ dir), so
+        // the caller will get a clean "plugin/ not found" error rather than crashing.
+        var asm = typeof(PluginReloadTools).Assembly.Location;
+        string? dir;
+        if (!string.IsNullOrEmpty(asm))
+        {
+            dir = Path.GetDirectoryName(asm);
+        }
+        else
+        {
+            try { dir = Path.GetDirectoryName(Environment.ProcessPath); }
+            catch { dir = AppContext.BaseDirectory; }
+        }
         while (dir is not null)
         {
             if (Directory.Exists(Path.Combine(dir, "plugin")) &&
@@ -39,9 +52,7 @@ public static class PluginReloadTools
                 return dir;
             dir = Path.GetDirectoryName(dir);
         }
-        return Path.GetFullPath(Path.Combine(
-            Path.GetDirectoryName(typeof(PluginReloadTools).Assembly.Location)!,
-            "..", "..", "..", ".."));
+        return AppContext.BaseDirectory;
     }
 
     static string? ResolveCmake()
@@ -196,7 +207,14 @@ public static class PluginReloadTools
         try
         {
             var root = RepoRoot();
-            var built = Path.Combine(root, "plugin", "build", "Release", "uevr_mcp.dll");
+            var repoBuilt = Path.Combine(root, "plugin", "build", "Release", "uevr_mcp.dll");
+            // Release-zip layout: uevr_mcp.dll sits next to UevrMcpServer.exe.
+            string? exeDir = null;
+            try { exeDir = Path.GetDirectoryName(Environment.ProcessPath); } catch { }
+            var releaseBuilt = exeDir is null ? null : Path.Combine(exeDir, "uevr_mcp.dll");
+            // Prefer the repo build (it's the one a dev would rebuild), fall back to the bundled DLL.
+            var built = File.Exists(repoBuilt) ? repoBuilt
+                      : (releaseBuilt != null && File.Exists(releaseBuilt) ? releaseBuilt : repoBuilt);
             var gameName = Path.GetFileNameWithoutExtension(gameExe);
             var installedDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "UnrealVRMod", gameName, "plugins");

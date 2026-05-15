@@ -46,9 +46,25 @@ public static class Dumper7Tools
 
     // ─── Paths ──────────────────────────────────────────────────────────
 
+    // Where the running UevrMcpServer.exe lives. ProcessPath is single-file-safe.
+    static string ExeDir()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exe)) return Path.GetDirectoryName(exe)!;
+        }
+        catch { }
+        return AppContext.BaseDirectory;
+    }
+
     static string RepoRoot()
     {
-        var dir = Path.GetDirectoryName(typeof(Dumper7Tools).Assembly.Location);
+        // For repo dev runs the assembly is under mcp-server/bin/... — walk up looking
+        // for the known repo layout. For single-file release exe, Assembly.Location is
+        // empty so we fall back to ExeDir().
+        var asm = typeof(Dumper7Tools).Assembly.Location;
+        var dir = string.IsNullOrEmpty(asm) ? ExeDir() : Path.GetDirectoryName(asm);
         while (dir is not null)
         {
             if (Directory.Exists(Path.Combine(dir, "plugin")) &&
@@ -56,8 +72,7 @@ public static class Dumper7Tools
                 return dir;
             dir = Path.GetDirectoryName(dir);
         }
-        var asm = Path.GetDirectoryName(typeof(Dumper7Tools).Assembly.Location)!;
-        return Path.GetFullPath(Path.Combine(asm, "..", "..", "..", ".."));
+        return ExeDir();
     }
 
     static string? ResolveDumperDll(string? overridePath)
@@ -68,6 +83,10 @@ public static class Dumper7Tools
         var env = Environment.GetEnvironmentVariable("DUMPER7_DLL");
         if (!string.IsNullOrEmpty(env) && File.Exists(env))
             return Path.GetFullPath(env);
+
+        // Release zip layout: dumper7.dll sits next to UevrMcpServer.exe.
+        var nextToExe = Path.Combine(ExeDir(), "dumper7.dll");
+        if (File.Exists(nextToExe)) return Path.GetFullPath(nextToExe);
 
         var root = RepoRoot();
         string[] candidates =

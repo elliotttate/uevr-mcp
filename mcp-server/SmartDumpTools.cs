@@ -429,11 +429,31 @@ public static class SmartDumpTools
         }, Json);
     }
 
+    // Single-file-safe starting directory for path probes.
+    static string GuessExeDir()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exe)) return Path.GetDirectoryName(exe)!;
+        }
+        catch { }
+        var asm = typeof(SmartDumpTools).Assembly.Location;
+        if (!string.IsNullOrEmpty(asm))
+            return Path.GetDirectoryName(asm) ?? AppContext.BaseDirectory;
+        return AppContext.BaseDirectory;
+    }
+
     static string? GuessPluginDll()
     {
         var env = Environment.GetEnvironmentVariable("UEVR_MCP_PLUGIN_DLL");
         if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
-        var dir = Path.GetDirectoryName(typeof(SmartDumpTools).Assembly.Location);
+        var exeDir = GuessExeDir();
+        // Release-zip layout: uevr_mcp.dll sits next to UevrMcpServer.exe.
+        var nextToExe = Path.Combine(exeDir, "uevr_mcp.dll");
+        if (File.Exists(nextToExe)) return nextToExe;
+        // Repo dev layout: walk up looking for plugin/build/Release.
+        var dir = exeDir;
         while (dir is not null)
         {
             var c = Path.Combine(dir, "plugin", "build", "Release", "uevr_mcp.dll");
@@ -446,12 +466,18 @@ public static class SmartDumpTools
     {
         var env = Environment.GetEnvironmentVariable("UEVR_BACKEND_DLL");
         if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
+        // Release-zip layout: UEVRBackend.dll sits next to UevrMcpServer.exe.
+        var nextToExe = Path.Combine(GuessExeDir(), "UEVRBackend.dll");
+        if (File.Exists(nextToExe)) return nextToExe;
         const string fallback = @"E:\Github\UEVR\build\bin\uevr\UEVRBackend.dll";
         return File.Exists(fallback) ? fallback : null;
     }
     static string? GuessDumper7Dll()
     {
-        var dir = Path.GetDirectoryName(typeof(SmartDumpTools).Assembly.Location);
+        var exeDir = GuessExeDir();
+        var nextToExe = Path.Combine(exeDir, "dumper7.dll");
+        if (File.Exists(nextToExe)) return nextToExe;
+        var dir = exeDir;
         while (dir is not null)
         {
             var c = Path.Combine(dir, "plugin", "build", "Release", "dumper7.dll");
