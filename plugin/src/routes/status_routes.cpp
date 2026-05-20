@@ -137,7 +137,24 @@ void register_routes(httplib::Server& server) {
             "/api/macro/delete", "/api/macro/get",
             "/api/discovery/subclasses", "/api/discovery/names",
             "/api/discovery/delegates", "/api/discovery/vtable",
-            "/api/discovery/pattern_scan", "/api/discovery/all_children"
+            "/api/discovery/pattern_scan", "/api/discovery/all_children",
+            "/api/render/status", "/api/render/snapshot", "/api/render/resources",
+            "/api/render/d3d12", "/api/render/shaders", "/api/render/preview",
+            "/api/render/context", "/api/render/selected-resource",
+            "/api/render/force-resources-sampling", "/api/render/force-shader-tracking",
+            "/api/render/force-d3d12-diagnostics", "/api/render/runtime-overrides",
+            "/api/render/request-shader-reload", "/api/render/capture-next-d3d12-change",
+            "/api/render/clear-captured-d3d12-change", "/api/render/reset-d3d12",
+            "/api/render/export-d3d12-pairs", "/api/render/export-frame-pair-diff",
+            "/api/render/export-bundle", "/api/render/stereo-summary",
+            "/api/render/select-eye", "/api/render/renderdoc/status",
+            "/api/render/renderdoc/trigger", "/api/render/renderdoc/launch-ui",
+            "/api/render/renderdoc/set-template", "/api/render/vr-state",
+            "/api/render/cvars", "/api/render/frame-timing",
+            "/api/render/eye-sample", "/api/render/eye-dump",
+            "/api/render/dxgi-messages", "/api/render/stereo-trace",
+            "/api/render/stereo-trace/enable", "/api/render/shader-bytecode",
+            "/api/render/hunter/capture-active-override-stub"
         });
 
         res.set_content(result.dump(2), "application/json");

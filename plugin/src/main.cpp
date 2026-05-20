@@ -6,6 +6,7 @@
 #include "pipe_server.h"
 #include "game_thread_queue.h"
 #include "json_helpers.h"
+#include "game_patches.h"
 #include "routes/status_routes.h"
 #include "routes/input_routes.h"
 #include "lua/lua_engine.h"
@@ -61,6 +62,7 @@ public:
         pipe.set_game_name(game_name);
         pipe.start();
         pipe.log("Plugin initializing for " + game_name);
+        GamePatches::apply_for_game(game_name);
         Diagnostics::get().initialize();
 
         // Start HTTP server (tries port 8899, falls back to next available)

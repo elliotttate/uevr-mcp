@@ -25,6 +25,7 @@
 #include "routes/process_event_routes.h"
 #include "routes/motion_controller_routes.h"
 #include "routes/timer_routes.h"
+#include "routes/render_routes.h"
 
 #include <uevr/API.hpp>
 #include <filesystem>
@@ -149,6 +150,7 @@ void HttpServer::register_routes() {
     ProcessEventRoutes::register_routes(*m_server);
     MotionControllerRoutes::register_routes(*m_server);
     TimerRoutes::register_routes(*m_server);
+    RenderRoutes::register_routes(*m_server);
 }
 
 void HttpServer::server_thread_func() {

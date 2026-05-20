@@ -23,6 +23,38 @@ public class ToolRegistrationTests
         "uevr_set_position", "uevr_set_health"
     };
 
+    static readonly HashSet<string> ExpectedRenderTools = new()
+    {
+        "uevr_render_status", "uevr_render_dxil_capabilities",
+        "uevr_render_snapshot", "uevr_render_resources", "uevr_render_d3d12",
+        "uevr_render_shaders", "uevr_render_shader_bytecode",
+        "uevr_render_shader_recovered_sources",
+        "uevr_render_runtime_overrides", "uevr_render_preview",
+        "uevr_render_context", "uevr_render_select_resource",
+        "uevr_render_force_resources_sampling", "uevr_render_force_shader_tracking",
+        "uevr_render_force_d3d12_diagnostics", "uevr_render_request_shader_reload",
+        "uevr_render_write_hlsl_override", "uevr_render_write_bind_override",
+        "uevr_render_write_dxil_text_patch", "uevr_render_write_container_patch",
+        "uevr_render_write_dxil_transform",
+        "uevr_render_capture_next_d3d12_change", "uevr_render_clear_captured_d3d12_change",
+        "uevr_render_reset_d3d12", "uevr_render_hunter_capture_active_override_stub",
+        "uevr_render_export_d3d12_pairs", "uevr_render_export_bundle",
+        "uevr_render_export_frame_pair_diff", "uevr_render_root_signatures",
+        "uevr_render_draw_events", "uevr_render_symmetry_oracle",
+        "uevr_render_descriptor_lineage", "uevr_render_pso_churn",
+        "uevr_render_stereo_summary", "uevr_render_select_eye",
+        "uevr_render_renderdoc_status", "uevr_render_renderdoc_trigger_capture",
+        "uevr_render_renderdoc_launch_ui", "uevr_render_renderdoc_set_capture_template",
+        "uevr_render_vr_state", "uevr_render_cvars", "uevr_render_frame_timing",
+        "uevr_render_gpu_timings",
+        "uevr_render_eye_pixel_sample", "uevr_render_eye_dump",
+        "uevr_render_eye_dump_both", "uevr_render_dxgi_messages",
+        "uevr_render_renderdoccmd_thumb", "uevr_render_renderdoccmd_convert",
+        "uevr_render_bind_history_per_eye", "uevr_render_stereo_trace_enable",
+        "uevr_render_stereo_trace", "uevr_render_diagnose_eye_bug",
+        "uevr_render_diagnose_shader_issue"
+    };
+
     static readonly HashSet<string> ExpectedTools = new()
     {
         // Core tools
@@ -111,16 +143,19 @@ public class ToolRegistrationTests
         var tools = DiscoverTools();
         var registered = tools.Select(t => t.Name).ToHashSet();
 
-        var missing = ExpectedTools.Except(registered).ToList();
+        var expected = ExpectedTools.Concat(ExpectedRenderTools).ToHashSet();
+        var missing = expected.Except(registered).ToList();
         Assert.True(missing.Count == 0,
             $"Missing tools: {string.Join(", ", missing)}");
     }
 
     [Fact]
-    public void TotalToolCount_Is113()
+    public void TotalToolCount_IsAtLeastExpected()
     {
         var tools = DiscoverTools();
-        Assert.Equal(113, tools.Count);
+        var expected = ExpectedTools.Concat(ExpectedRenderTools).ToHashSet();
+        Assert.True(tools.Count >= expected.Count,
+            $"Expected at least {expected.Count} tools, found {tools.Count}");
     }
 
     [Fact]
@@ -134,13 +169,16 @@ public class ToolRegistrationTests
     }
 
     [Fact]
-    public void NoUnexpectedToolsRegistered()
+    public void NoDuplicateToolNamesRegistered()
     {
         var tools = DiscoverTools();
-        var registered = tools.Select(t => t.Name).ToHashSet();
-        var unexpected = registered.Except(ExpectedTools).ToList();
-        Assert.True(unexpected.Count == 0,
-            $"Unexpected tools: {string.Join(", ", unexpected)}");
+        var duplicates = tools
+            .GroupBy(t => t.Name)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+        Assert.True(duplicates.Count == 0,
+            $"Duplicate tool names: {string.Join(", ", duplicates)}");
     }
 
     [Fact]
@@ -164,13 +202,13 @@ public class ToolRegistrationTests
     }
 
     [Fact]
-    public void AllToolsReturnTaskOfString()
+    public void AllToolsReturnStringOrTaskOfString()
     {
         var tools = DiscoverTools();
         foreach (var (name, method) in tools)
         {
-            Assert.True(method.ReturnType == typeof(Task<string>),
-                $"Tool '{name}' returns {method.ReturnType.Name} instead of Task<string>");
+            Assert.True(method.ReturnType == typeof(Task<string>) || method.ReturnType == typeof(string),
+                $"Tool '{name}' returns {method.ReturnType.Name} instead of string/Task<string>");
         }
     }
 

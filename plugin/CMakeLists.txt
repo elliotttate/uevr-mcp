@@ -54,6 +54,7 @@ add_library(uevr_mcp SHARED
     src/diagnostics.cpp
     src/http_server.cpp
     src/pipe_server.cpp
+    src/game_patches.cpp
     src/game_thread_queue.cpp
     src/json_helpers.cpp
     src/reflection/property_reader.cpp
@@ -91,6 +92,7 @@ add_library(uevr_mcp SHARED
     src/routes/process_event_routes.cpp
     src/routes/motion_controller_routes.cpp
     src/routes/timer_routes.cpp
+    src/routes/render_routes.cpp
 )
 
 target_include_directories(uevr_mcp PRIVATE
@@ -106,7 +108,7 @@ target_compile_definitions(uevr_mcp PRIVATE
     SOL_ALL_SAFETIES_ON=1
 )
 
-target_link_libraries(uevr_mcp PRIVATE ws2_32 lua54 d3d11 d3d12 dxgi windowscodecs ole32 psapi)
+target_link_libraries(uevr_mcp PRIVATE ws2_32 lua54 d3d11 d3d12 dxgi dxguid windowscodecs ole32 psapi)
 
 # MSVC settings
 if(MSVC)

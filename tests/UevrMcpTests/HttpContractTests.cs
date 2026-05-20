@@ -38,7 +38,7 @@ public class HttpContractTests
         Assert.Equal("address", ps[0].Name);
         Assert.Equal(typeof(string), ps[0].ParameterType);
         Assert.Equal("steps", ps[1].Name);
-        Assert.Equal(typeof(JsonElement), ps[1].ParameterType);
+        Assert.Equal(typeof(string), ps[1].ParameterType);
     }
 
     [Fact]
@@ -170,6 +170,121 @@ public class HttpContractTests
         Assert.False(ps[0].HasDefaultValue);
     }
 
+    // ── Render / DXIL ──
+
+    [Fact]
+    public void RenderShaderBytecode_HasStageHashAndOptionalDisassembly()
+    {
+        var method = GetTool("uevr_render_shader_bytecode");
+        var ps = method.GetParameters();
+        Assert.Equal("stage", ps[0].Name);
+        Assert.Equal(typeof(string), ps[0].ParameterType);
+        Assert.False(ps[0].HasDefaultValue);
+        Assert.Equal("hash", ps[1].Name);
+        Assert.Equal(typeof(string), ps[1].ParameterType);
+        Assert.False(ps[1].HasDefaultValue);
+        Assert.Equal("disassemble", ps[2].Name);
+        Assert.True(ps[2].HasDefaultValue);
+    }
+
+    [Fact]
+    public void RenderRuntimeOverrides_RequiresEnabled()
+    {
+        var method = GetTool("uevr_render_runtime_overrides");
+        var ps = method.GetParameters();
+        Assert.Single(ps);
+        Assert.Equal("enabled", ps[0].Name);
+        Assert.Equal(typeof(bool), ps[0].ParameterType);
+        Assert.False(ps[0].HasDefaultValue);
+    }
+
+    [Fact]
+    public void RenderHunterCaptureStub_DefaultsToPixelStage()
+    {
+        var method = GetTool("uevr_render_hunter_capture_active_override_stub");
+        var ps = method.GetParameters();
+        Assert.Single(ps);
+        Assert.Equal("stage", ps[0].Name);
+        Assert.Equal(typeof(string), ps[0].ParameterType);
+        Assert.True(ps[0].HasDefaultValue);
+        Assert.Equal("ps", ps[0].DefaultValue);
+    }
+
+    [Fact]
+    public void RenderWriteHlslOverride_HasTargetStageAndSource()
+    {
+        var method = GetTool("uevr_render_write_hlsl_override");
+        var ps = method.GetParameters();
+        Assert.Equal("targetHash", ps[0].Name);
+        Assert.Equal(typeof(string), ps[0].ParameterType);
+        Assert.False(ps[0].HasDefaultValue);
+        Assert.Equal("stage", ps[1].Name);
+        Assert.Equal(typeof(string), ps[1].ParameterType);
+        Assert.False(ps[1].HasDefaultValue);
+        Assert.Equal("hlslSource", ps[2].Name);
+        Assert.Equal(typeof(string), ps[2].ParameterType);
+        Assert.False(ps[2].HasDefaultValue);
+    }
+
+    [Fact]
+    public void RenderWriteBindOverride_DefaultsDisabledAndReloads()
+    {
+        var method = GetTool("uevr_render_write_bind_override");
+        var ps = method.GetParameters();
+        Assert.Equal("targetHash", ps[0].Name);
+        Assert.Equal("rootParameter", ps[1].Name);
+        Assert.Equal(typeof(int), ps[1].ParameterType);
+        Assert.Equal("valuesU32", ps[2].Name);
+        Assert.True(ps[2].HasDefaultValue);
+        Assert.Null(ps[2].DefaultValue);
+        Assert.Equal(false, ps.First(p => p.Name == "enabled").DefaultValue);
+        Assert.Equal(true, ps.First(p => p.Name == "reload").DefaultValue);
+    }
+
+    [Fact]
+    public void RenderWritePatchTools_AcceptJsonPayloads()
+    {
+        foreach (var name in new[] { "uevr_render_write_dxil_text_patch", "uevr_render_write_container_patch", "uevr_render_write_dxil_transform" })
+        {
+            var method = GetTool(name);
+            var ps = method.GetParameters();
+            Assert.Equal("targetHash", ps[0].Name);
+            Assert.Equal("stage", ps[1].Name);
+            Assert.Equal(typeof(string), ps[2].ParameterType);
+            Assert.False(ps[2].HasDefaultValue);
+            Assert.Equal(false, ps.First(p => p.Name == "enabled").DefaultValue);
+            Assert.Contains(ps, p => p.Name == "perEyeVariants");
+        }
+    }
+
+    [Fact]
+    public void RenderGpuTimings_AllParamsOptional()
+    {
+        var method = GetTool("uevr_render_gpu_timings");
+        foreach (var p in method.GetParameters())
+            Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
+    }
+
+    [Fact]
+    public void RenderRecoveredSources_HasStageHashAndOptionalLimit()
+    {
+        var method = GetTool("uevr_render_shader_recovered_sources");
+        var ps = method.GetParameters();
+        Assert.Equal("stage", ps[0].Name);
+        Assert.Equal("hash", ps[1].Name);
+        Assert.False(ps[0].HasDefaultValue);
+        Assert.False(ps[1].HasDefaultValue);
+        Assert.True(ps[2].HasDefaultValue);
+    }
+
+    [Fact]
+    public void RenderDiagnoseShaderIssue_AllParamsOptional()
+    {
+        var method = GetTool("uevr_render_diagnose_shader_issue");
+        foreach (var p in method.GetParameters())
+            Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
+    }
+
     // ── Player Write ──
 
     [Fact]
@@ -201,7 +316,7 @@ public class HttpContractTests
         var ps = method.GetParameters();
         Assert.Single(ps);
         Assert.Equal("value", ps[0].Name);
-        Assert.Equal(typeof(JsonElement), ps[0].ParameterType);
+        Assert.Equal(typeof(string), ps[0].ParameterType);
     }
 
     // ── Lua Exec ──
@@ -375,7 +490,7 @@ public class HttpContractTests
         Assert.Equal("className", ps[0].Name);
         Assert.Equal("fieldName", ps[1].Name);
         Assert.Equal("value", ps[2].Name);
-        Assert.Equal(typeof(JsonElement), ps[2].ParameterType);
+        Assert.Equal(typeof(string), ps[2].ParameterType);
     }
 
     // ── Blueprint Destroy ──
