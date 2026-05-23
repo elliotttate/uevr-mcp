@@ -400,6 +400,52 @@ async function updateVRSettings() {
   }
 }
 
+// ---- Stereo Forensics card ----
+async function updateForensics() {
+  try {
+    const d = await fetchJson('/api/render/stereo-forensics');
+    const el = document.getElementById('forensics-content');
+    setDot('forensics-card', !d.error && d.enabled !== false);
+    if (d.error) { el.innerHTML = `<span class='error-msg'>${d.error}</span>`; return; }
+
+    const session = d.session_dir || '';
+    const shortSession = session ? session.split(/[\\/]/).slice(-1)[0] : '';
+    el.innerHTML =
+      row('Enabled', d.enabled ? 'Yes' : 'No', d.enabled ? 'highlight' : 'warn') +
+      row('Experiments', d.experiments_enabled ? 'Yes' : 'No', d.experiments_enabled ? 'highlight' : '') +
+      row('Session', esc(shortSession || 'None')) +
+      `<div class='btn-row'>
+        <button class='btn btn-primary' id='btn-forensics-arm' ${d.enabled ? '' : 'disabled'}>Arm Capture</button>
+      </div>
+      <div id='forensics-status' class='console-status'></div>`;
+
+    const arm = document.getElementById('btn-forensics-arm');
+    if (arm) {
+      arm.addEventListener('click', async () => {
+        const status = document.getElementById('forensics-status');
+        status.textContent = 'Arming...';
+        status.className = 'console-status';
+        try {
+          const r = await fetch(API_BASE + '/api/render/stereo-forensics/arm', { method: 'POST' });
+          const result = await r.json();
+          if (result.ok) {
+            status.textContent = 'Capture armed';
+            status.className = 'console-status console-ok';
+          } else {
+            status.textContent = result.error || 'Not armed';
+            status.className = 'console-status console-err';
+          }
+        } catch (e) {
+          status.textContent = e.message;
+          status.className = 'console-status console-err';
+        }
+      });
+    }
+  } catch(e) {
+    setDot('forensics-card', false);
+  }
+}
+
 // ---- Lua card ----
 let luaLoaded = false;
 
@@ -931,7 +977,7 @@ function startPolling() {
   setInterval(() => { updateStatus(); updatePlayer(); updatePoses(); }, 2000);
 
   // Slow polling (5s)
-  setInterval(() => { updateVR(); updateVRSettings(); updateLua(); updateSpawned(); }, 5000);
+  setInterval(() => { updateVR(); updateVRSettings(); updateForensics(); updateLua(); updateSpawned(); }, 5000);
 
   // Game info (10s)
   setInterval(() => { updateGameInfo(); }, 10000);
@@ -985,6 +1031,7 @@ function setupConsoleEvents() {
     updateVR(),
     updatePoses(),
     updateVRSettings(),
+    updateForensics(),
     updateLua(),
     updateSpawned(),
   ]);

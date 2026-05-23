@@ -49,7 +49,13 @@ public static class UhtSdkTools
         "PlayerState", "HUD", "SpectatorPawn", "DefaultPawn", "CameraActor",
         "StaticMeshActor", "SkeletalMeshActor", "Light", "DirectionalLight",
         "PointLight", "SpotLight", "SkyLight", "TriggerBox", "TriggerSphere",
-        "PlayerStart", "PlayerCameraManager",
+        "PlayerStart", "PlayerCameraManager", "DecalActor", "EmitterActor",
+        "Emitter", "NoteActor", "NavMeshBoundsVolume", "PostProcessVolume",
+        "BlockingVolume", "LevelStreamingVolume", "AmbientSound",
+        "PhysicsVolume", "SceneCapture2D", "SceneCaptureCube",
+        "GameViewportClient", "LevelScriptActor", "WorldSettings",
+        "AssetManagerSettings", "NavigationData", "NetConnection",
+        "LocalPlayer", "PlayerInput", "Reverb",
         // Components
         "ActorComponent", "SceneComponent", "PrimitiveComponent", "StaticMeshComponent",
         "SkeletalMeshComponent", "MeshComponent", "InstancedStaticMeshComponent",
@@ -226,13 +232,20 @@ public static class UhtSdkTools
         if ((flags & CPF.EditorOnly)            != 0) parts.Add("EditorOnly");
         if ((flags & CPF.AdvancedDisplay)       != 0) parts.Add("AdvancedDisplay");
         else if ((flags & CPF.SimpleDisplay)    != 0) parts.Add("SimpleDisplay");
-        if ((flags & CPF.ExposeOnSpawn)         != 0) parts.Add("ExposeOnSpawn");
         if ((flags & CPF.BlueprintAssignable)   != 0) parts.Add("BlueprintAssignable");
         if ((flags & CPF.BlueprintCallable)     != 0) parts.Add("BlueprintCallable");
         if ((flags & CPF.Net)                   != 0)
             parts.Add((flags & CPF.RepNotify) != 0 ? "ReplicatedUsing" : "Replicated");
         if ((flags & CPF.AssetRegistrySearchable) != 0) parts.Add("AssetRegistrySearchable");
         if ((flags & CPF.Deprecated)            != 0) parts.Add("Deprecated");
+
+        // Meta specifiers — these go inside meta=(...) not as top-level specifiers.
+        // UHT 4.26 rejects them at top level: "Unknown variable specifier 'ExposeOnSpawn'".
+        var meta = new List<string>();
+        if ((flags & CPF.ExposeOnSpawn) != 0) meta.Add("ExposeOnSpawn=true");
+
+        if (meta.Count > 0)
+            parts.Add("meta=(" + string.Join(", ", meta) + ")");
 
         return parts.Count == 0 ? "UPROPERTY()" : "UPROPERTY(" + string.Join(", ", parts) + ")";
     }
@@ -304,6 +317,31 @@ public static class UhtSdkTools
     [ThreadStatic] static HashSet<string>? _referencedClasses;
     [ThreadStatic] static HashSet<string>? _referencedStructs;
     [ThreadStatic] static HashSet<string>? _referencedEnums;
+    // Set of type names we're actually emitting this pass. The renderer uses
+    // this to emit `#include "X.h"` for in-set types (enums by reference,
+    // structs by value) vs `class X;` forward decls for out-of-set types
+    // (pointer / engine-provided / already-available via Engine.h pulls).
+    // Populated by DumpUeProject + EmitUhtProjectFromReflection before any
+    // RenderUhtHeader call.
+    [ThreadStatic] static HashSet<string>? _emittableTypes;
+    // Just the enum subset of the emittable set — EnumProperty refs must not
+    // resolve to a class/struct that happens to share a core name, since that
+    // would let `E<StructName>` slip through and UHT rejects it.
+    [ThreadStatic] static HashSet<string>? _emittableEnums;
+    // Engine-scanned enum names (core form, E-prefix stripped) — gives
+    // EnumProperty resolution a type-kind signal that the combined engine-
+    // scan set can't. Without this, game fields tagged as enum that share
+    // a core name with an engine class (e.g. `Direction` which is a class in
+    // SlateCore but also a common enum name in game code) falsely resolve as
+    // known engine types and emit `EFoo` that UHT can't find.
+    [ThreadStatic] static HashSet<string>? _engineScanEnums;
+    // Engine-scan result shared with renderer so `IsClassRefResolvable` can
+    // tell apart "this type exists in some engine plugin" from "unknown".
+    [ThreadStatic] static HashSet<string>? _engineScanTypes;
+    // Set of type names we've classified as UE interfaces (super == "Interface").
+    // Renderer uses this to decide TScriptInterface<IFoo> vs raw pointer for
+    // UPROPERTY object refs — UHT rejects "UFoo*" when UFoo is an interface.
+    [ThreadStatic] static HashSet<string>? _interfaceTypes;
 
     static readonly HashSet<string> ActorBases = new(StringComparer.Ordinal) {
         "Actor","AActor","Pawn","APawn","Character","ACharacter",
@@ -399,7 +437,15 @@ public static class UhtSdkTools
     static string EscapeCppString(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
     static string CompactJson(JsonElement e)
     {
-        var s = e.GetRawText();
+        // Serialize with WriteIndented=false to strip all whitespace
+        // (GetRawText preserves the original pretty-printed form with
+        // newlines, which breaks C++ preprocessor parsing when the
+        // result lands inside a `// default: ...` comment — unclosed
+        // strings on continuation lines cause
+        // "Unterminated string constant" in UHT).
+        var s = JsonSerializer.Serialize(e, new JsonSerializerOptions { WriteIndented = false });
+        // Also strip embedded newlines (shouldn't be any but belt-and-suspenders).
+        s = s.Replace("\r", "").Replace("\n", "\\n");
         return s.Length > 80 ? s.Substring(0, 77) + "..." : s;
     }
 
@@ -435,6 +481,75 @@ public static class UhtSdkTools
         _                => "uint8",
     };
 
+    static bool IsContainerType(string uhtType)
+    {
+        return uhtType.StartsWith("TArray<", StringComparison.Ordinal)
+            || uhtType.StartsWith("TSet<",   StringComparison.Ordinal)
+            || uhtType.StartsWith("TMap<",   StringComparison.Ordinal);
+    }
+
+    // Render a type reference preserving the raw reflection prefix if it
+    // matches a valid UE prefix (A/U/I + uppercase). This is critical when
+    // the game registers two classes with the same core name but different
+    // prefixes (ACompassLocator vs ICompassLocator) — stripping + re-deriving
+    // via Prefix() collapses them to the same C++ name and UHT rejects.
+    // Falls back to Prefix() for names with no valid prefix (structs etc).
+    static string RenderTypeRef(string rawName)
+    {
+        if (string.IsNullOrEmpty(rawName)) return "UObject";
+        var core = Sanitize(StripUePrefix(rawName));
+        bool rawHasPrefix = rawName.Length >= 2
+                         && (rawName[0] == 'A' || rawName[0] == 'U' || rawName[0] == 'I')
+                         && char.IsUpper(rawName[1]);
+        string pref = rawHasPrefix ? rawName[0].ToString() : Prefix(core);
+        return pref + core;
+    }
+
+    // Is a type reference resolvable? True when:
+    //   - it's in the current emit set (will produce a header this pass), or
+    //   - it's a known engine type (UE ships a header for it).
+    // Otherwise the referencing header would produce "Unrecognized type" at
+    // UHT time. Callers fall back to UObject* / TSubclassOf<UObject> instead.
+    // Is the named class an interface? Checks the interface set populated by
+    // DumpUeProject (class whose super == "Interface"). Also falls back to
+    // name-heuristic: if the reflection name starts with "I" + uppercase,
+    // likely an interface (common UE convention for interface companion).
+    static bool IsInterfaceType(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        if (_interfaceTypes is not null && _interfaceTypes.Contains(name)) return true;
+        // Reflection could report super as "Interface", "UInterface", or "IInterface"
+        // — accept any of the three.
+        if (_superMap is not null && _superMap.TryGetValue(name, out var supr))
+            if (supr == "Interface" || supr == "UInterface" || supr == "IInterface") return true;
+        // Also check the StripUePrefix form — our emittable set is keyed by raw
+        // reflection name, but references arrive with/without I-prefix.
+        var stripped = StripUePrefix(name);
+        if (_interfaceTypes is not null && _interfaceTypes.Contains(stripped)) return true;
+        if (_superMap is not null && _superMap.TryGetValue(stripped, out var supr2))
+            if (supr2 == "Interface" || supr2 == "UInterface" || supr2 == "IInterface") return true;
+        // Heuristic fallback: names that begin with "I<Upper>" are UE's
+        // conventional interface naming.
+        if (name.Length >= 2 && name[0] == 'I' && char.IsUpper(name[1])) return true;
+        return false;
+    }
+
+    static bool IsClassRefResolvable(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        if (_emittableTypes is not null && _emittableTypes.Contains(name)) return true;
+        if (IsEngineType(name)) return true;
+        // Engine-scan results — broader than the hardcoded list. Covers
+        // plugin types like AQosBeaconClient, FVector3f, etc. — anything
+        // UE ships in its source tree. Stripped the same way the scan
+        // stores names (prefix-removed).
+        if (_engineScanTypes is not null)
+        {
+            if (_engineScanTypes.Contains(StripUePrefix(name))) return true;
+        }
+        return false;
+    }
+
     // Strip a UE C++ type prefix (A/U/I/F/E) if and only if the second char
     // is uppercase. "AActor" -> "Actor" but "AnimMontage" stays "AnimMontage"
     // (it's just a class whose name starts with A).
@@ -467,21 +582,43 @@ public static class UhtSdkTools
             case "StrProperty":    return "FString";
             case "TextProperty":   return "FText";
             case "ArrayProperty":
-                return "TArray<" + (tag.TryGetProperty("inner", out var ai) && ai.ValueKind == JsonValueKind.Object
-                    ? RenderUhtType(ai) : "uint8") + ">";
+                {
+                    // UHT forbids nested containers (TArray<TArray<T>> / TArray<TSet<T>> /
+                    // TArray<TMap<K,V>>). Flatten to raw byte when the inner is a
+                    // container. NO inline /* */ comment — if this value ends up
+                    // inside another flattened container's rendering, nested /*
+                    // blocks aren't legal C++ and UHT errors on "Missing variable
+                    // name". The annotation goes on the UPROPERTY line instead.
+                    var innerType = tag.TryGetProperty("inner", out var ai) && ai.ValueKind == JsonValueKind.Object
+                        ? RenderUhtType(ai) : "uint8";
+                    if (IsContainerType(innerType)) return "uint8";
+                    return "TArray<" + innerType + ">";
+                }
             case "SetProperty":
-                return "TSet<" + (tag.TryGetProperty("inner", out var si) && si.ValueKind == JsonValueKind.Object
-                    ? RenderUhtType(si) : "uint8") + ">";
+                {
+                    var innerType = tag.TryGetProperty("inner", out var si) && si.ValueKind == JsonValueKind.Object
+                        ? RenderUhtType(si) : "uint8";
+                    if (IsContainerType(innerType)) return "uint8";
+                    return "TSet<" + innerType + ">";
+                }
             case "MapProperty":
                 {
                     string kt = tag.TryGetProperty("key",   out var k) && k.ValueKind == JsonValueKind.Object ? RenderUhtType(k) : "FName";
                     string vt = tag.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.Object ? RenderUhtType(v) : "FString";
+                    if (IsContainerType(kt) || IsContainerType(vt)) return "uint8";
                     return $"TMap<{kt}, {vt}>";
                 }
             case "StructProperty":
                 {
                     var sn = tag.TryGetProperty("structName", out var snEl) ? snEl.GetString() : null;
-                    if (string.IsNullOrEmpty(sn)) return "uint8[] /*struct*/";
+                    if (string.IsNullOrEmpty(sn)) return "uint8 /*struct*/";
+                    // Struct refs that aren't in our emit set AND aren't engine-
+                    // provided would produce "Unrecognized type 'FXxx'" at UHT.
+                    // Engine structs (FVector, FHitResult, etc.) are fine because
+                    // CoreMinimal.h pulls them in. Game structs we filtered out
+                    // aren't — fall back to a byte placeholder for those.
+                    if (!IsClassRefResolvable(sn!))
+                        return "uint8 /*F" + Sanitize(sn!) + "*/";
                     _referencedStructs?.Add(sn!);
                     return "F" + Sanitize(sn!);
                 }
@@ -489,8 +626,24 @@ public static class UhtSdkTools
                 {
                     var en = tag.TryGetProperty("enumName", out var enEl) ? enEl.GetString() : null;
                     if (string.IsNullOrEmpty(en)) return "uint8 /*enum*/";
+                    // Fall back to uint8 when the referenced enum isn't in our
+                    // emittable ENUM set and isn't an engine-provided one.
+                    // IsClassRefResolvable alone is insufficient: the name may
+                    // match a struct/class in the emittable set (e.g. USMAP
+                    // has struct `Action` AND a field tagged EnumProperty
+                    // enum_name=Action) — emitting `EAction` would reference a
+                    // non-existent enum. Check the enum-only set first.
+                    bool enumKnown =
+                        (_emittableEnums is not null && _emittableEnums.Contains(en!))
+                        || IsEngineType(en!)
+                        || (_engineScanEnums is not null && _engineScanEnums.Contains(StripUePrefix(en!)));
+                    if (!enumKnown)
+                        return "uint8 /*E" + Sanitize(StripUePrefix(en!)) + "*/";
                     _referencedEnums?.Add(en!);
-                    return "E" + Sanitize(en!).TrimStart('E');
+                    // Use StripUePrefix so names like "Element" (E followed by
+                    // lowercase) don't lose their leading E. Only actual
+                    // prefixes (E followed by uppercase) get stripped.
+                    return "E" + Sanitize(StripUePrefix(en!));
                 }
             case "ObjectProperty":
             case "WeakObjectProperty":
@@ -500,29 +653,39 @@ public static class UhtSdkTools
                 {
                     var pc = tag.TryGetProperty("propertyClass", out var pcEl) ? pcEl.GetString() : null;
                     if (string.IsNullOrEmpty(pc)) return "UObject*";
+                    if (!IsClassRefResolvable(pc!)) return type switch {
+                        "WeakObjectProperty"  => "TWeakObjectPtr<UObject>",
+                        "LazyObjectProperty"  => "TLazyObjectPtr<UObject>",
+                        "SoftObjectProperty"  => "TSoftObjectPtr<UObject>",
+                        _                     => "UObject*"
+                    };
                     _referencedClasses?.Add(pc!);
                     var core = Sanitize(StripUePrefix(pc!));
-                    var p = Prefix(core);
-                    if (type == "WeakObjectProperty")   return $"TWeakObjectPtr<{p}{core}>";
-                    if (type == "LazyObjectProperty")   return $"TLazyObjectPtr<{p}{core}>";
-                    if (type == "SoftObjectProperty")   return $"TSoftObjectPtr<{p}{core}>";
-                    return $"{p}{core}*";
+                    // If the class is an interface, UE forbids raw pointer
+                    // refs as UPROPERTY types — use TScriptInterface<IFoo>.
+                    if (IsInterfaceType(pc!))
+                        return $"TScriptInterface<I{core}>";
+                    var typeRef = RenderTypeRef(pc!);
+                    if (type == "WeakObjectProperty")   return $"TWeakObjectPtr<{typeRef}>";
+                    if (type == "LazyObjectProperty")   return $"TLazyObjectPtr<{typeRef}>";
+                    if (type == "SoftObjectProperty")   return $"TSoftObjectPtr<{typeRef}>";
+                    return $"{typeRef}*";
                 }
             case "ClassProperty":
                 {
                     var mc = tag.TryGetProperty("metaClass", out var mcEl) ? mcEl.GetString() : null;
                     if (string.IsNullOrEmpty(mc)) return "UClass*";
+                    if (!IsClassRefResolvable(mc!)) return "TSubclassOf<UObject>";
                     _referencedClasses?.Add(mc!);
-                    var core = Sanitize(mc!);
-                    return $"TSubclassOf<{Prefix(core)}{core}>";
+                    return $"TSubclassOf<{RenderTypeRef(mc!)}>";
                 }
             case "SoftClassProperty":
                 {
                     var mc = tag.TryGetProperty("metaClass", out var mcEl) ? mcEl.GetString() : null;
                     if (string.IsNullOrEmpty(mc)) return "TSoftClassPtr<UObject>";
+                    if (!IsClassRefResolvable(mc!)) return "TSoftClassPtr<UObject>";
                     _referencedClasses?.Add(mc!);
-                    var core = Sanitize(mc!);
-                    return $"TSoftClassPtr<{Prefix(core)}{core}>";
+                    return $"TSoftClassPtr<{RenderTypeRef(mc!)}>";
                 }
             case "InterfaceProperty":
                 {
@@ -568,40 +731,96 @@ public static class UhtSdkTools
 
         if (kind == "Class")
         {
+            // Preserve the raw reflection name's prefix when possible — the
+            // game may genuinely register two distinct classes with the same
+            // core name but different prefix letters (e.g. `ACompassLocator`
+            // concrete class AND `ICompassLocator` interface companion). If
+            // we strip + re-prefix, both collapse to `UCompassLocator` and
+            // UHT gets two conflicting definitions of the same name. Keep
+            // the raw prefix on the emit body.
+            //
+            // `name` here is the raw reflection name (e.g. "ACompassLocator",
+            // "ICompassLocator", "AActor", "MyComponent"). If it already has
+            // a valid UE prefix (A/U/I/F/E followed by uppercase), trust it.
+            // Otherwise compute one from the super chain.
+            string finalName;
             var core = Sanitize(StripUePrefix(name));
-            var pref = Prefix(core);
             var superCore = string.IsNullOrEmpty(super) ? "Object" : Sanitize(StripUePrefix(super!));
             var superPref = string.IsNullOrEmpty(super) ? "U" : Prefix(superCore);
+            // Preserve the raw reflection prefix (A/U/I). The game may register
+            // two distinct classes with the same core but different prefixes
+            // (e.g. ACompassLocator + ICompassLocator). If we strip and re-
+            // derive via Prefix(), both collapse to UCompassLocator and UHT
+            // rejects the duplicate definition. Falling back to Prefix() only
+            // when the raw name has no prefix (e.g. struct names).
+            bool rawHasPrefix = name.Length >= 2
+                             && (name[0] == 'A' || name[0] == 'U' || name[0] == 'I')
+                             && char.IsUpper(name[1]);
+            bool rawIsInterface = rawHasPrefix && name[0] == 'I';
+            string pref = rawHasPrefix ? name[0].ToString() : Prefix(core);
+            finalName = pref + core;
+
+            // Detect interface: super is literally "Interface" / "UInterface" /
+            // "IInterface" — UE's built-in interface base. Interfaces need the
+            // UINTERFACE macro + U<Name> companion class + I<Name> pure-virtual
+            // body pair, not a plain UCLASS. Otherwise UHT rejects with
+            // "Class 'X' cannot extend interface 'Interface', use 'implements'".
+            // Also triggers when the raw reflection name starts with 'I' —
+            // interface companion classes are always I-prefixed.
+            bool isInterface = superCore == "Interface"
+                            || superCore == "UInterface"
+                            || (rawHasPrefix && name[0] == 'I');
 
             // Phase 4: UCLASS flags + ClassConfigName + interfaces.
             uint cflags = t.TryGetProperty("classFlags", out var cf) && cf.ValueKind == JsonValueKind.Number
                 ? cf.GetUInt32() : 0u;
             string? configName = t.TryGetProperty("classConfigName", out var cn) ? cn.GetString() : null;
-            body.AppendLine(UClassSpecifier((CLASS)cflags, configName));
 
-            // Build inheritance list: super + interfaces.
-            var inherits = new List<string> { $"public {superPref}{superCore}" };
-            if (t.TryGetProperty("interfaces", out var ifacesEl) && ifacesEl.ValueKind == JsonValueKind.Array)
+            if (isInterface)
             {
-                foreach (var i in ifacesEl.EnumerateArray())
-                {
-                    var iname = i.GetString();
-                    if (string.IsNullOrEmpty(iname)) continue;
-                    _referencedClasses?.Add(iname);
-                    // Interface UE classes are named with a "U"-prefix UClass + "I"-prefix C++ class.
-                    // The C++ inheritance target is the I-prefix form.
-                    var icore = Sanitize(StripUePrefix(iname));
-                    inherits.Add($"public I{icore}");
-                }
+                // UINTERFACE + I-class pair. No fields — interfaces can't have
+                // UPROPERTY members. Methods are emitted later as pure-virtual.
+                body.AppendLine("UINTERFACE(MinimalAPI, BlueprintType)");
+                body.AppendLine($"class {apiMacro}U{core} : public UInterface {{");
+                body.AppendLine("    GENERATED_BODY()");
+                body.AppendLine("};");
+                body.AppendLine();
+                body.AppendLine($"class {apiMacro}I{core} {{");
+                body.AppendLine("    GENERATED_BODY()");
+                body.AppendLine("public:");
             }
-            body.AppendLine($"class {apiMacro}{pref}{core} : {string.Join(", ", inherits)} {{");
-            body.AppendLine("    GENERATED_BODY()");
-            body.AppendLine("public:");
+            else
+            {
+                body.AppendLine(UClassSpecifier((CLASS)cflags, configName));
+
+                // Build inheritance list: super + interfaces.
+                var inherits = new List<string> { $"public {superPref}{superCore}" };
+                if (t.TryGetProperty("interfaces", out var ifacesEl) && ifacesEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var i in ifacesEl.EnumerateArray())
+                    {
+                        var iname = i.GetString();
+                        if (string.IsNullOrEmpty(iname)) continue;
+                        _referencedClasses?.Add(iname);
+                        var icore = Sanitize(StripUePrefix(iname));
+                        inherits.Add($"public I{icore}");
+                    }
+                }
+                body.AppendLine($"class {apiMacro}{finalName} : {string.Join(", ", inherits)} {{");
+                body.AppendLine("    GENERATED_BODY()");
+                body.AppendLine("public:");
+            }
         }
         else
         {
+            // Struct body: do NOT StripUePrefix. Reflection names for structs
+            // are already the "core" form (e.g. "Vector", "HitResult", "BigData"),
+            // never with an F prefix. Names like "AIColorRowHandle" start with
+            // A + uppercase but A is NOT a prefix — it's part of "AI". Stripping
+            // it produces "FIColorRowHandle" which doesn't match the field-ref
+            // rendering `F{Sanitize(sn)}` = "FAIColorRowHandle".
             body.AppendLine("USTRUCT(BlueprintType)");
-            body.AppendLine($"struct {apiMacro}F{Sanitize(StripUePrefix(name))} {{");
+            body.AppendLine($"struct {apiMacro}F{Sanitize(name)} {{");
             body.AppendLine("    GENERATED_BODY()");
         }
 
@@ -634,6 +853,23 @@ public static class UhtSdkTools
                     if (lit is not null) initializer = " = " + lit;
                     else defComment = "  // default: " + CompactJson(dv);
                 }
+
+                // Delegate + field-path types aren't UHT-compatible as raw
+                // property declarations — UE requires a DECLARE_DYNAMIC_*_DELEGATE
+                // typedef per field, with signature info we don't have. Emit as
+                // a commented-out placeholder so the field shows up in the
+                // header (for documentation) but UHT skips it.
+                bool isDelegate = uhtType == "FScriptDelegate"
+                               || uhtType == "FMulticastScriptDelegate"
+                               || uhtType == "FSparseDelegate"
+                               || uhtType == "FFieldPath";
+                if (isDelegate) {
+                    body.AppendLine($"    // {spec} — dropped: {uhtType} (signature not captured)");
+                    body.AppendLine($"    // {uhtType} {Sanitize(fname)};  // +0x{offset:X}");
+                    body.AppendLine();
+                    continue;
+                }
+
                 body.AppendLine($"    {spec}");
                 body.AppendLine($"    {uhtType} {Sanitize(fname)}{initializer};  // +0x{offset:X}{defComment}");
                 body.AppendLine();
@@ -711,18 +947,49 @@ public static class UhtSdkTools
         hdr.AppendLine("#include \"UObject/ObjectMacros.h\"");
         hdr.AppendLine();
 
+        // Emit decision:
+        //   - Enums: must #include (UHT needs the full UENUM macro for property tags).
+        //     If enum isn't in our emittable set, it's engine-provided — forward-decl falls back.
+        //   - Structs: prefer #include when in emittable set (USTRUCT bodies are needed for
+        //     by-value fields); forward decl when out-of-set (pointer-only is rare for structs).
+        //   - Classes: forward decl is fine when used as a pointer (which is nearly always).
+        //     Full #include only needed for superclass, and that's emitted via the
+        //     generated.h pull chain anyway.
         foreach (var rc in _referencedClasses!.OrderBy(x => x, StringComparer.Ordinal))
         {
-            var rcCore = Sanitize(StripUePrefix(rc));
-            var rcPref = Prefix(rcCore);
-            hdr.AppendLine($"class {rcPref}{rcCore};");
+            // Use the same raw-prefix-preserving logic as the field renderer
+            // so the forward decl and the field type agree. Without this,
+            // a field rendered as `ASkill* Skill` would be paired with a
+            // forward decl `class USkill;` and UHT can't resolve the type.
+            hdr.AppendLine($"class {RenderTypeRef(rc)};");
         }
+
         if (_referencedStructs!.Count > 0) hdr.AppendLine();
         foreach (var rs in _referencedStructs!.OrderBy(x => x, StringComparer.Ordinal))
-            hdr.AppendLine($"struct F{Sanitize(StripUePrefix(rs))};");
+        {
+            // Filename uses the raw reflection name (matches EmitHeader's
+            // Sanitize(name) path). Struct type in field declarations
+            // always prepends F via RenderUhtType's "F" + Sanitize(sn).
+            var rsFile = Sanitize(rs);
+            var rsCore = Sanitize(StripUePrefix(rs));
+            if (_emittableTypes != null && _emittableTypes.Contains(rs))
+                hdr.AppendLine($"#include \"{rsFile}.h\"");
+            else
+                hdr.AppendLine($"struct F{rsCore};");
+        }
+
         if (_referencedEnums!.Count > 0) hdr.AppendLine();
         foreach (var re in _referencedEnums!.OrderBy(x => x, StringComparer.Ordinal))
-            hdr.AppendLine($"enum class E{Sanitize(StripUePrefix(re))} : uint8;");
+        {
+            var reCore = Sanitize(StripUePrefix(re));
+            // Enums MUST be fully included when referenced — UHT needs UENUM macro
+            // expansion to accept the type in a UPROPERTY(...) tag. Forward decl
+            // fails with "Unrecognized type 'EXxx' - type must be a UCLASS, USTRUCT or UENUM".
+            if (_emittableTypes != null && _emittableTypes.Contains(re))
+                hdr.AppendLine($"#include \"E{reCore}.h\"");
+            else
+                hdr.AppendLine($"enum class E{reCore} : uint8;");
+        }
 
         hdr.AppendLine();
         hdr.AppendLine($"#include \"{Sanitize(name)}.generated.h\"");
@@ -968,6 +1235,125 @@ public static class UhtSdkTools
                     superMap[c.GetProperty("name").GetString() ?? ""] = s;
         _superMap = superMap;
 
+        // Engine-source scan: names registered as UCLASS/USTRUCT/UENUM inside
+        // UE4/UE5's shipped headers. Used to drop types whose basename already
+        // exists in the engine (USMAP is a FULL reflection snapshot that
+        // includes every loaded class; without this filter we'd emit shadow
+        // headers for TriggerCapsule, WidgetComponent, UserDefinedEnum, etc.
+        // that duplicate engine ones and trigger "Duplicate leaf header name").
+        HashSet<string>? engineTypeNames = null;
+        try
+        {
+            var engineRoot = ResolveEngineRootForEngineAssociation(engineAssociation);
+            if (engineRoot is not null && Directory.Exists(engineRoot))
+            {
+                engineTypeNames = CollectEngineTypeNames(engineRoot);
+                if (_engineEnumCache.TryGetValue(engineRoot, out var eSet))
+                    _engineScanEnums = eSet;
+            }
+        }
+        catch { }
+        _engineScanTypes = engineTypeNames;
+
+        bool IsEngineProvided(string name)
+        {
+            if (IsEngineType(name)) return true;
+            if (engineTypeNames is null) return false;
+            // Try several prefix-strip variants. UHT's duplicate-name check
+            // is semantic, not textual: `ABOrder` and `UBorder` both reduce to
+            // "Border" if UHT considers "AB" and "U" as prefixes. Our emitter
+            // strips one char, but that's not enough — check raw, single-strip,
+            // and double-strip (case-insensitive) against engine names.
+            if (engineTypeNames.Contains(name)) return true;
+            var s1 = StripUePrefix(name);
+            if (engineTypeNames.Contains(s1)) return true;
+            // Double-strip: handles names where the first two chars are a
+            // conjoined prefix (ABOrder → BOrder → Border after second strip).
+            var s2 = StripUePrefix(s1);
+            if (s2 != s1 && engineTypeNames.Contains(s2)) return true;
+            return false;
+        }
+
+        // ── Collect emittable types (skip engine-provided up front) ────────
+        var pendingClasses = new List<JsonElement>();
+        var pendingStructs = new List<JsonElement>();
+        var pendingEnums   = new List<JsonElement>();
+        int skipped = 0;
+        if (root.TryGetProperty("classes", out var c0))
+            foreach (var c in c0.EnumerateArray())
+            {
+                var n = c.GetProperty("name").GetString() ?? "";
+                if (IsEngineProvided(n)) { skipped++; continue; }
+                pendingClasses.Add(c);
+            }
+        if (root.TryGetProperty("structs", out var s0))
+            foreach (var st in s0.EnumerateArray())
+            {
+                var n = st.GetProperty("name").GetString() ?? "";
+                if (IsEngineProvided(n)) { skipped++; continue; }
+                pendingStructs.Add(st);
+            }
+        if (root.TryGetProperty("enums", out var e0))
+            foreach (var en in e0.EnumerateArray())
+            {
+                var n = en.GetProperty("name").GetString() ?? "";
+                if (IsEngineProvided(n)) { skipped++; continue; }
+                pendingEnums.Add(en);
+            }
+
+        // ── Transitive closure: drop classes/structs whose super was skipped
+        // and isn't in engine scan. Iterate until stable (parents can cascade).
+        var emittable = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var c in pendingClasses)   emittable.Add(c.GetProperty("name").GetString() ?? "");
+        foreach (var st in pendingStructs)  emittable.Add(st.GetProperty("name").GetString() ?? "");
+        foreach (var en in pendingEnums)    emittable.Add(en.GetProperty("name").GetString() ?? "");
+
+        bool SuperResolvable(string? superName)
+        {
+            if (string.IsNullOrEmpty(superName)) return true;
+            if (emittable.Contains(superName)) return true;
+            if (IsEngineProvided(superName)) return true;
+            return false;
+        }
+
+        int droppedDueToSuper = 0;
+        for (int pass = 0; pass < 8; pass++)
+        {
+            int droppedThisPass = 0;
+            foreach (var bucket in new[] { pendingClasses, pendingStructs })
+            {
+                for (int i = bucket.Count - 1; i >= 0; i--)
+                {
+                    var supr = bucket[i].TryGetProperty("super", out var sp2) ? sp2.GetString() : null;
+                    if (!SuperResolvable(supr))
+                    {
+                        emittable.Remove(bucket[i].GetProperty("name").GetString() ?? "");
+                        bucket.RemoveAt(i);
+                        droppedThisPass++;
+                    }
+                }
+            }
+            droppedDueToSuper += droppedThisPass;
+            if (droppedThisPass == 0) break;
+        }
+
+        // Expose the final emittable set so RenderUhtType can decide #include vs forward decl
+        // vs fall back to `uint8 /*FXxx*/` for references whose targets we dropped.
+        _emittableTypes = emittable;
+
+        _emittableEnums = new HashSet<string>(
+            pendingEnums.Select(e => e.GetProperty("name").GetString() ?? ""),
+            StringComparer.Ordinal);
+
+        _interfaceTypes = new HashSet<string>(
+            pendingClasses
+                .Where(c => {
+                    var supr = c.TryGetProperty("super", out var sp2) ? sp2.GetString() : null;
+                    return supr == "Interface" || supr == "UInterface" || supr == "IInterface";
+                })
+                .Select(c => c.GetProperty("name").GetString() ?? ""),
+            StringComparer.Ordinal);
+
         Directory.CreateDirectory(outDir);
         var modDir = Path.Combine(outDir, "Source", moduleName);
         var pubDir = Path.Combine(modDir, "Public");
@@ -976,18 +1362,25 @@ public static class UhtSdkTools
         Directory.CreateDirectory(prvDir);
         string moduleApi = moduleName.ToUpperInvariant() + "_API";
 
-        int classes = 0, structs = 0, enums = 0, skipped = 0, skippedDup = 0;
+        int classes = 0, structs = 0, enums = 0, skippedDup = 0;
         // Track stripped-basename we've already emitted. UHT errors with
         // "shares engine name" when two of our own types produce the same
         // stripped name (e.g. `AHoleSpawner` class + `FHoleSpawner` struct
         // both collapse to "HoleSpawner"). First emit wins.
+        //
+        // Enums are tracked separately: C++ class/struct and enum live in
+        // different namespaces in UHT. Struct `FAction` and enum `EAction` can
+        // coexist — different filenames (Action.h vs EAction.h) and different
+        // type identifiers. Sharing a single dedup set would drop the enum if
+        // a same-core struct emits first, leaving field-site refs to `EAction`
+        // dangling (UHT error "Unrecognized type 'EAction'").
         var emittedStripped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var emittedStrippedEnums = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             void EmitHeader(JsonElement t, string kind)
             {
                 var name = t.GetProperty("name").GetString() ?? "Unnamed";
-                if (IsEngineType(name)) { skipped++; return; }
                 // Internal collision check — collapsed-name must be unique.
                 var collapsed = name;
                 if (collapsed.Length >= 2
@@ -999,22 +1392,16 @@ public static class UhtSdkTools
                 File.WriteAllText(Path.Combine(pubDir, Sanitize(name) + ".h"), hdr);
                 if (kind == "Class") classes++; else structs++;
             }
-            if (root.TryGetProperty("classes", out var c2))
-                foreach (var cls in c2.EnumerateArray()) EmitHeader(cls, "Class");
-            if (root.TryGetProperty("structs", out var s2))
-                foreach (var st in s2.EnumerateArray()) EmitHeader(st, "ScriptStruct");
-            if (root.TryGetProperty("enums", out var eArr))
+            foreach (var cls in pendingClasses) EmitHeader(cls, "Class");
+            foreach (var st in pendingStructs)  EmitHeader(st, "ScriptStruct");
+            foreach (var en in pendingEnums)
             {
-                foreach (var e in eArr.EnumerateArray())
-                {
-                    var name = e.GetProperty("name").GetString() ?? "Unnamed";
-                    if (IsEngineType(name)) { skipped++; continue; }
-                    var core = StripUePrefix(name);
-                    if (!emittedStripped.Add(core)) { skippedDup++; continue; }
-                    File.WriteAllText(Path.Combine(pubDir, "E" + Sanitize(core) + ".h"),
-                        RenderUhtEnum(e));
-                    enums++;
-                }
+                var name = en.GetProperty("name").GetString() ?? "Unnamed";
+                var core = StripUePrefix(name);
+                if (!emittedStrippedEnums.Add(core)) { skippedDup++; continue; }
+                File.WriteAllText(Path.Combine(pubDir, "E" + Sanitize(core) + ".h"),
+                    RenderUhtEnum(en));
+                enums++;
             }
 
             // Minimal Build.cs, module stub, target + uproject — same templates
@@ -1027,8 +1414,15 @@ public static class UhtSdkTools
             build.AppendLine("        PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;");
             build.AppendLine();
             build.AppendLine("        PublicDependencyModuleNames.AddRange(new string[] {");
-            build.AppendLine("            \"Core\", \"CoreUObject\", \"Engine\", \"InputCore\", \"UMG\",");
-            build.AppendLine("            \"SlateCore\", \"Slate\", \"AIModule\", \"GameplayTags\"");
+            // Broad set of modules — game reflection dumps typically reference
+            // types from all of these. Trimming the list is user-level cleanup;
+            // the emitter errs on the side of resolving more references.
+            build.AppendLine("            \"Core\", \"CoreUObject\", \"Engine\", \"InputCore\", \"UMG\", \"SlateCore\", \"Slate\",");
+            build.AppendLine("            \"AIModule\", \"GameplayTags\", \"GameplayTasks\", \"PhysicsCore\", \"NavigationSystem\",");
+            build.AppendLine("            \"OnlineSubsystemUtils\", \"OnlineSubsystem\", \"Qos\", \"MediaAssets\", \"MovieScene\",");
+            build.AppendLine("            \"ApplicationCore\", \"DeveloperSettings\", \"HTTP\", \"NetCore\", \"PacketHandler\",");
+            build.AppendLine("            \"RenderCore\", \"RHI\", \"Landscape\", \"Foliage\", \"AnimGraphRuntime\",");
+            build.AppendLine("            \"MovieSceneTracks\", \"AudioMixer\",");
             build.AppendLine("        });");
             build.AppendLine("    }");
             build.AppendLine("}");
@@ -1084,6 +1478,11 @@ public static class UhtSdkTools
             _referencedClasses = null;
             _referencedStructs = null;
             _referencedEnums = null;
+            _emittableTypes = null;
+            _emittableEnums = null;
+            _engineScanTypes = null;
+            _engineScanEnums = null;
+            _interfaceTypes = null;
         }
 
         return JsonSerializer.Serialize(new {
@@ -1095,6 +1494,7 @@ public static class UhtSdkTools
                 classes, structs, enums,
                 totalHeaders = classes + structs + enums,
                 skippedEngineTypes = skipped,
+                droppedDueToSuper,
                 skippedDuplicates = skippedDup,
             },
         }, JsonOpts);
@@ -1135,6 +1535,16 @@ public static class UhtSdkTools
                 mod = GameModuleFromFullName(full!);
             if (mod is null) return;
             if (skipEngineModules && IsEngineModule(mod)) return;
+            // Drop types that share a name with an engine-provided built-in.
+            // Live-reflection walks sometimes surface game-module types whose
+            // base name collides with engine types (APlayerController,
+            // AAnimInstance, ACharacter, ADecalActor, etc.) — the game's own
+            // /Script/<Module>.APlayerController shadows engine's. Emitting
+            // the header produces `class APlayerController : public APlayerController`
+            // which UHT rejects with "class cannot inherit itself or a type
+            // with the same name but a different prefix".
+            var typeName = t.TryGetProperty("name", out var nm) ? nm.GetString() : null;
+            if (!string.IsNullOrEmpty(typeName) && IsEngineType(typeName!)) return;
             if (!moduleTypes.TryGetValue(mod, out var list))
                 moduleTypes[mod] = list = new List<(JsonElement, string)>();
             list.Add((t, kind));
@@ -1163,6 +1573,88 @@ public static class UhtSdkTools
         }
 
         projectName ??= moduleTypes.Keys.OrderBy(x => x, StringComparer.Ordinal).First();
+
+        // ── Transitive closure filter ────────────────────────────────────
+        //
+        // A child type whose parent is outside our emit set AND outside
+        // engine-provided types produces UHT error "Couldn't find parent
+        // type for 'X' named 'Y'". That cascades: any type inheriting from
+        // a dropped type also becomes invalid. Loop passes until stable.
+        //
+        // Parents are considered valid if:
+        //   1. They're in our emittable set (same or sibling module), OR
+        //   2. They're engine types (UE provides the real header), OR
+        //   3. They're in the hardcoded IsEngineType list (includes common
+        //      AActor / UObject-derived types).
+        var emittable = new HashSet<string>(
+            moduleTypes.SelectMany(kv => kv.Value).Select(p => p.el.GetProperty("name").GetString() ?? ""),
+            StringComparer.Ordinal);
+
+        // Engine-source type names for the target engine, if we can find it.
+        // Falls back to just the hardcoded IsEngineType list.
+        HashSet<string>? engineTypeNames = null;
+        try
+        {
+            var engineRoot = ResolveEngineRootForEngineAssociation(engineAssociation);
+            if (engineRoot is not null && Directory.Exists(engineRoot))
+            {
+                engineTypeNames = CollectEngineTypeNames(engineRoot);
+                if (_engineEnumCache.TryGetValue(engineRoot, out var eSet))
+                    _engineScanEnums = eSet;
+            }
+        }
+        catch { /* best-effort; fall back to hardcoded list */ }
+        _engineScanTypes = engineTypeNames;
+
+        bool SuperResolvable(string? superName)
+        {
+            if (string.IsNullOrEmpty(superName)) return true; // no super = OK (root type)
+            if (emittable.Contains(superName)) return true;
+            if (IsEngineType(superName)) return true;
+            if (engineTypeNames is not null && engineTypeNames.Contains(StripUePrefix(superName))) return true;
+            return false;
+        }
+
+        int droppedDueToSuper = 0;
+        for (int pass = 0; pass < 8; pass++)
+        {
+            int droppedThisPass = 0;
+            foreach (var kv in moduleTypes.ToList())
+            {
+                var kept = new List<(JsonElement el, string kind)>();
+                foreach (var (el, kind) in kv.Value)
+                {
+                    var supr = el.TryGetProperty("super", out var sp) ? sp.GetString() : null;
+                    if (SuperResolvable(supr))
+                        kept.Add((el, kind));
+                    else
+                    {
+                        droppedThisPass++;
+                        emittable.Remove(el.GetProperty("name").GetString() ?? "");
+                    }
+                }
+                moduleTypes[kv.Key] = kept;
+            }
+            droppedDueToSuper += droppedThisPass;
+            if (droppedThisPass == 0) break;
+        }
+
+        // Expose the emittable set to the renderer so it can decide #include vs forward decl.
+        _emittableTypes = emittable;
+
+        // Build the interface set — any class whose direct super is the UInterface
+        // base. Reflection may report the super as "Interface" (short form) or
+        // "UInterface" (with prefix). Renderer uses this to decide
+        // TScriptInterface<> vs raw pointer for UPROPERTY refs.
+        _interfaceTypes = new HashSet<string>(
+            moduleTypes
+                .SelectMany(kv => kv.Value)
+                .Where(pair => {
+                    var supr = pair.el.TryGetProperty("super", out var sp) ? sp.GetString() : null;
+                    return supr == "Interface" || supr == "UInterface" || supr == "IInterface";
+                })
+                .Select(pair => pair.el.GetProperty("name").GetString() ?? ""),
+            StringComparer.Ordinal);
 
         Directory.CreateDirectory(outDir);
         Directory.CreateDirectory(Path.Combine(outDir, "Source"));
@@ -1293,6 +1785,10 @@ public static class UhtSdkTools
             _referencedClasses = null;
             _referencedStructs = null;
             _referencedEnums = null;
+            _emittableTypes = null;
+            _engineScanTypes = null;
+            _engineScanEnums = null;
+            _interfaceTypes = null;
         }
 
         return JsonSerializer.Serialize(new {
@@ -1302,8 +1798,225 @@ public static class UhtSdkTools
                 projectName,
                 moduleCount = moduleTypes.Count,
                 totalHeaders,
+                droppedDueToSuper,
                 modules = perModuleStats,
             },
         }, JsonOpts);
+    }
+
+    // ─── Engine-type discovery helpers ────────────────────────────────
+    //
+    // For the transitive-closure filter we accept a "super is an engine type"
+    // pass-through — if the game inherits from AActor, UObject, UActorComponent
+    // etc., those are provided by UE's own headers. Two sources:
+    //
+    //   1. The hardcoded IsEngineType list — curated set of common engine
+    //      type names we KNOW are always available.
+    //   2. A scan of the target engine's source tree for UCLASS/USTRUCT/UENUM
+    //      declarations — comprehensive but requires the engine to be installed.
+    //
+    // The scan result is cached per engine install on disk to make
+    // re-emits fast.
+
+    static string? ResolveEngineRootForEngineAssociation(string ver)
+    {
+        // Try common install locations for the requested UE version.
+        foreach (var root in new[] {
+            $@"E:\Epic Games\UE_{ver}",
+            $@"D:\Epic Games\UE_{ver}",
+            $@"C:\Program Files\Epic Games\UE_{ver}",
+            $@"E:\UnrealEngine\UE_{ver}",
+        })
+        {
+            if (Directory.Exists(root)) return root;
+        }
+        // Registered installs via Windows registry.
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine
+                .OpenSubKey($@"SOFTWARE\EpicGames\Unreal Engine\{ver}");
+            var dir = key?.GetValue("InstalledDirectory") as string;
+            if (dir is not null && Directory.Exists(dir)) return dir;
+        }
+        catch { }
+        return null;
+    }
+
+    static readonly Dictionary<string, HashSet<string>> _engineNameCache = new(StringComparer.OrdinalIgnoreCase);
+    static readonly System.Text.RegularExpressions.Regex _engineUcStructEnum = new(
+        @"\b(UCLASS|USTRUCT|UINTERFACE|UENUM)\s*\(",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+    // Matches `class [MACRO1] [MACRO2(args)] ... TypeName`. Engine headers have
+    // many flavors: `class ENGINE_API Foo`, `class UE_DEPRECATED(...) Foo`,
+    // `class DLLEXPORT MINIMAL_API Foo`, bare `class Foo`. The first group is
+    // the kind keyword, the final word-token (after zero or more UPPER-case
+    // macros with optional `(...)` argument lists) is the class/struct name.
+    static readonly System.Text.RegularExpressions.Regex _engineClassStructEnum = new(
+        @"\b(class|struct|enum\s+class|enum)\s+(?:[A-Z_][A-Z_0-9]*(?:\s*\([^)]*\))?\s+)*(\w+)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // Fallback for intrinsics: `class <X_API> <Name> :` anywhere in the file.
+    // CoreUObject declares UInt8Property, UIntProperty, UInterfaceProperty, etc.
+    // with DECLARE_CASTED_CLASS_INTRINSIC and no surrounding UCLASS() macro,
+    // so the primary scan can't find them by anchoring on UCLASS. The `:` at
+    // the end bounds to actual class declarations (not typedefs / forward
+    // decls / friend class X; statements).
+    static readonly System.Text.RegularExpressions.Regex _engineBareClassDecl = new(
+        @"\bclass\s+[A-Z_][A-Z_0-9]*_API\s+(\w+)\s*:",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    static readonly Dictionary<string, HashSet<string>> _engineEnumCache = new(StringComparer.OrdinalIgnoreCase);
+
+    // Returns the combined engine type-name set. Also populates _engineEnumCache
+    // with the enum-only subset (keyed by engineRoot) as a side effect — the
+    // emitter's EnumProperty path reads that via GetEngineEnumNames to avoid
+    // misresolving game enum refs against same-named engine classes.
+    static HashSet<string> CollectEngineTypeNames(string engineRoot)
+    {
+        lock (_engineNameCache)
+        {
+            if (_engineNameCache.TryGetValue(engineRoot, out var cached)) return cached;
+
+            // Disk cache (survives process restarts).
+            var cachePath = Path.Combine(Path.GetTempPath(),
+                "uevr-mcp-engine-names-" +
+                BitConverter.ToString(System.Security.Cryptography.SHA1.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(engineRoot))).Replace("-", "")[..16] + ".txt");
+            var enumCachePath = cachePath.Replace(".txt", "-enums.txt");
+            // Use case-insensitive compare: Windows filesystem is case-
+            // insensitive and UHT flags "SAFEZONE.h" colliding with "SafeZone.h".
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var enumSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (File.Exists(cachePath) && File.Exists(enumCachePath))
+            {
+                try
+                {
+                    foreach (var line in File.ReadAllLines(cachePath))
+                        if (line.Length > 0) set.Add(line);
+                    foreach (var line in File.ReadAllLines(enumCachePath))
+                        if (line.Length > 0) enumSet.Add(line);
+                    _engineNameCache[engineRoot] = set;
+                    _engineEnumCache[engineRoot] = enumSet;
+                    return set;
+                }
+                catch { set.Clear(); enumSet.Clear(); }
+            }
+
+            // Scan Engine/Source + Engine/Plugins for UCLASS/USTRUCT/UENUM sites.
+            // For each site, look ahead for the class/struct/enum declaration
+            // and capture the name. Strip A/U/F/E/I prefix when stripping
+            // so "AActor" and "Actor" both canonicalize to "Actor".
+            //
+            // ALSO add every engine header's basename (without .h) — UHT's
+            // "Duplicate leaf header name" manifest error is triggered by
+            // filename collisions regardless of whether the declared class name
+            // matches, so the skip set must cover both. Without this, reflection
+            // dumps that include plugin classes whose UCLASS site the regex
+            // can't parse (UE_DEPRECATED + multiple macros, conditional
+            // compilation blocks, etc.) fall through and shadow real engine
+            // headers.
+            foreach (var sub in new[] {
+                Path.Combine(engineRoot, "Engine", "Source"),
+                Path.Combine(engineRoot, "Engine", "Plugins"),
+            })
+            {
+                if (!Directory.Exists(sub)) continue;
+                try
+                {
+                    foreach (var h in Directory.EnumerateFiles(sub, "*.h", SearchOption.AllDirectories))
+                    {
+                        // Skip ThirdParty/ — it's vendored non-UE source (WebRTC,
+                        // PhysX, etc.) and has lowercase filenames like
+                        // `availability.h` that pollute the skip set via the
+                        // case-insensitive cache comparer.
+                        if (h.IndexOf(Path.DirectorySeparatorChar + "ThirdParty" + Path.DirectorySeparatorChar,
+                                      StringComparison.OrdinalIgnoreCase) >= 0)
+                            continue;
+
+                        // File-basename path: capture "AtmosphericFog" from
+                        // "AtmosphericFog.h". The A/U/F/E/I-prefix canonicalize
+                        // step below handles the case where engine files are
+                        // named with the C++ prefix (e.g. "ABasePawn.h").
+                        var baseName = Path.GetFileNameWithoutExtension(h);
+                        // UE type headers are PascalCase. Skip lowercase-first
+                        // basenames (these are typically ThirdParty leftovers
+                        // or Unix-style system headers that slipped in).
+                        if (baseName.Length > 0 && char.IsUpper(baseName[0]))
+                        {
+                            if (baseName.Length >= 2 && (baseName[0] == 'A' || baseName[0] == 'U' || baseName[0] == 'F' || baseName[0] == 'E' || baseName[0] == 'I')
+                                && (char.IsUpper(baseName[1]) || char.IsDigit(baseName[1])))
+                                set.Add(baseName.Substring(1));
+                            set.Add(baseName);
+                        }
+
+                        string text;
+                        try { text = File.ReadAllText(h); } catch { continue; }
+                        foreach (System.Text.RegularExpressions.Match m in _engineUcStructEnum.Matches(text))
+                        {
+                            var kindMacro = m.Groups[1].Value; // UCLASS / USTRUCT / UINTERFACE / UENUM
+                            // Find paren balance then scan forward for class/struct name.
+                            int i = m.Index + m.Length;
+                            int depth = 1;
+                            while (i < text.Length && depth > 0)
+                            {
+                                char c = text[i++];
+                                if (c == '(') depth++;
+                                else if (c == ')') depth--;
+                            }
+                            if (depth != 0 || i >= text.Length) continue;
+                            // Look ahead at most 300 chars for the declaration.
+                            int scanEnd = Math.Min(text.Length, i + 300);
+                            var sub2 = text.Substring(i, scanEnd - i);
+                            var nameM = _engineClassStructEnum.Match(sub2);
+                            if (!nameM.Success) continue;
+                            var name = nameM.Groups[2].Value;
+                            var declKind = nameM.Groups[1].Value; // class / struct / enum class / enum
+                            // Type names are PascalCase — reject anything that
+                            // doesn't start with an uppercase letter. Common
+                            // false positive: the regex matches `class ` inside
+                            // a doc comment and captures the next word (often
+                            // a lowercase parameter name or natural-language
+                            // word like "availability"), which then pollutes
+                            // the skip set and makes the emitter treat
+                            // unrelated enum references as engine-provided.
+                            if (name.Length == 0 || !char.IsUpper(name[0])) continue;
+                            // Canonicalize.
+                            if (name.Length >= 2 && (name[0] == 'A' || name[0] == 'U' || name[0] == 'F' || name[0] == 'E' || name[0] == 'I')
+                                && (char.IsUpper(name[1]) || char.IsDigit(name[1])))
+                                name = name.Substring(1);
+                            if (name.StartsWith("DEPRECATED_", StringComparison.Ordinal))
+                                name = name.Substring("DEPRECATED_".Length);
+                            set.Add(name);
+                            // If UENUM() or decl keyword is enum, also track enum-only.
+                            if (kindMacro == "UENUM" || declKind.StartsWith("enum", StringComparison.Ordinal))
+                                enumSet.Add(name);
+                        }
+
+                        // Fallback: some CoreUObject intrinsics (UInt8Property,
+                        // UIntProperty, UInterfaceProperty, ...) are declared
+                        // WITHOUT a preceding UCLASS() macro — they use
+                        // DECLARE_CASTED_CLASS_INTRINSIC instead. The regex
+                        // pattern above anchors on UCLASS so it misses them.
+                        // Scan for `class <API_MACRO> <Name> :` anywhere in the
+                        // file and add the canonicalized name too.
+                        foreach (System.Text.RegularExpressions.Match m2 in _engineBareClassDecl.Matches(text))
+                        {
+                            var n = m2.Groups[1].Value;
+                            if (n.Length == 0 || !char.IsUpper(n[0])) continue;
+                            if (n.Length >= 2 && (n[0] == 'A' || n[0] == 'U' || n[0] == 'F' || n[0] == 'E' || n[0] == 'I')
+                                && (char.IsUpper(n[1]) || char.IsDigit(n[1])))
+                                n = n.Substring(1);
+                            set.Add(n);
+                        }
+                    }
+                }
+                catch { }
+            }
+            try { File.WriteAllLines(cachePath, set); } catch { }
+            try { File.WriteAllLines(enumCachePath, enumSet); } catch { }
+            _engineNameCache[engineRoot] = set;
+            _engineEnumCache[engineRoot] = enumSet;
+            return set;
+        }
     }
 }

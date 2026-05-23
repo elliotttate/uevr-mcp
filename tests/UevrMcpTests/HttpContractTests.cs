@@ -244,7 +244,7 @@ public class HttpContractTests
     [Fact]
     public void RenderWritePatchTools_AcceptJsonPayloads()
     {
-        foreach (var name in new[] { "uevr_render_write_dxil_text_patch", "uevr_render_write_container_patch", "uevr_render_write_dxil_transform" })
+        foreach (var name in new[] { "uevr_render_write_dxil_text_patch", "uevr_render_write_container_patch", "uevr_render_write_dxil_transform", "uevr_render_write_dxil_semantic_transform" })
         {
             var method = GetTool(name);
             var ps = method.GetParameters();
@@ -258,9 +258,34 @@ public class HttpContractTests
     }
 
     [Fact]
+    public void RenderWritePerEyePayloads_HasOptionalPayloads()
+    {
+        var method = GetTool("uevr_render_write_per_eye_shader_payloads");
+        var ps = method.GetParameters();
+        Assert.Equal("targetHash", ps[0].Name);
+        Assert.Equal("stage", ps[1].Name);
+        Assert.False(ps[0].HasDefaultValue);
+        Assert.False(ps[1].HasDefaultValue);
+        Assert.Contains(ps, p => p.Name == "leftTransformJson" && p.HasDefaultValue);
+        Assert.Contains(ps, p => p.Name == "rightTransformJson" && p.HasDefaultValue);
+        Assert.Contains(ps, p => p.Name == "leftSemanticTransformJson" && p.HasDefaultValue);
+        Assert.Contains(ps, p => p.Name == "rightSemanticTransformJson" && p.HasDefaultValue);
+        Assert.Contains(ps, p => p.Name == "leftBytecodePath" && p.HasDefaultValue);
+        Assert.Contains(ps, p => p.Name == "rightBytecodePath" && p.HasDefaultValue);
+    }
+
+    [Fact]
     public void RenderGpuTimings_AllParamsOptional()
     {
         var method = GetTool("uevr_render_gpu_timings");
+        foreach (var p in method.GetParameters())
+            Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
+    }
+
+    [Fact]
+    public void RenderAbPixelDiff_AllParamsOptional()
+    {
+        var method = GetTool("uevr_render_ab_pixel_diff");
         foreach (var p in method.GetParameters())
             Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
     }
@@ -283,6 +308,42 @@ public class HttpContractTests
         var method = GetTool("uevr_render_diagnose_shader_issue");
         foreach (var p in method.GetParameters())
             Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
+    }
+
+    [Fact]
+    public void RenderLlmFrameInvestigator_AllParamsOptional()
+    {
+        var method = GetTool("uevr_render_llm_frame_investigator");
+        foreach (var p in method.GetParameters())
+            Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
+    }
+
+    [Fact]
+    public void RenderPipelineCacheEvents_AllParamsOptional()
+    {
+        var method = GetTool("uevr_render_pipeline_cache_events");
+        foreach (var p in method.GetParameters())
+            Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional");
+    }
+
+    [Fact]
+    public void RenderOverrideStatus_RequiresTargetHash()
+    {
+        var method = GetTool("uevr_render_override_status");
+        var ps = method.GetParameters();
+        Assert.Equal("targetHash", ps[0].Name);
+        Assert.False(ps[0].HasDefaultValue);
+        Assert.True(ps[1].HasDefaultValue);
+    }
+
+    [Fact]
+    public void RenderMakeFixCandidate_RequiresTargetHash()
+    {
+        var method = GetTool("uevr_render_make_fix_candidate");
+        var ps = method.GetParameters();
+        Assert.Equal("targetHash", ps[0].Name);
+        Assert.False(ps[0].HasDefaultValue);
+        Assert.All(ps.Skip(1), p => Assert.True(p.HasDefaultValue, $"Parameter '{p.Name}' should be optional"));
     }
 
     // ── Player Write ──

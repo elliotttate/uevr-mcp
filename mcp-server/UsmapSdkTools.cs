@@ -170,6 +170,134 @@ public static class UsmapSdkTools
                 if (LooksLikeClass(name)) classes.Add(entry);
                 else structs.Add(entry);
             }
+
+            // Second pass: demote classes whose super is a known STRUCT (either
+            // another USMAP struct or a hardcoded engine struct). USMAP doesn't
+            // distinguish class vs struct and our first-pass heuristic (name
+            // prefix + common suffixes) misclassifies game-specific names like
+            // `ActRow` (Act = act of the game, not A-prefix for actor) as
+            // classes even when they inherit from FTableRowBase (a struct).
+            // Iterate until stable — demotion cascades.
+            var structNames = new HashSet<string>(structs.Select(x => (string)x.GetType().GetProperty("name")!.GetValue(x)!), StringComparer.Ordinal);
+            // Known engine structs (canonical, no F-prefix) that game code
+            // commonly inherits from. Keeps demotion working even when the
+            // engine super doesn't appear in the USMAP.
+            var engineStructSupers = new HashSet<string>(new[] {
+                "TableRowBase", "InputActionKeyMapping", "InputAxisKeyMapping",
+                "DataTableRowHandle", "SoftObjectPath", "SoftClassPath",
+                "GameplayTag", "GameplayTagContainer", "GameplayAbilityActorInfo",
+                "AttributeCapture", "Vector", "Vector2D", "Vector4", "Rotator",
+                "Quat", "Transform", "Color", "LinearColor", "IntPoint",
+                "IntVector", "Box", "Box2D", "Sphere", "Plane", "Matrix",
+            }, StringComparer.Ordinal);
+            bool StructSuper(string? s)
+            {
+                if (string.IsNullOrEmpty(s)) return false;
+                return structNames.Contains(s!) || engineStructSupers.Contains(s!);
+            }
+            bool anyDemoted = true;
+            while (anyDemoted)
+            {
+                anyDemoted = false;
+                for (int i = classes.Count - 1; i >= 0; i--)
+                {
+                    var c = classes[i];
+                    var supr = (string?)c.GetType().GetProperty("super")!.GetValue(c);
+                    if (StructSuper(supr))
+                    {
+                        structs.Add(c);
+                        structNames.Add((string)c.GetType().GetProperty("name")!.GetValue(c)!);
+                        classes.RemoveAt(i);
+                        anyDemoted = true;
+                    }
+                }
+            }
+
+            // Third pass: demote classes that are referenced as StructProperty
+            // by any field. USMAP property tags carry "structName" — a
+            // definitive type signal that outranks the name heuristic. E.g.
+            // `AreaDelay` reads like a class (A-prefix) but if any field holds
+            // `TArray<FAreaDelay>` (StructProperty→structName=AreaDelay), the
+            // real type is a struct. Walk all collected types' field tags,
+            // collect referenced struct names, demote any class matching.
+            var referencedStructNames = new HashSet<string>(StringComparer.Ordinal);
+            void CollectStructRefs(System.Text.Json.JsonElement tag)
+            {
+                if (tag.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+                if (tag.TryGetProperty("type", out var tEl) && tEl.GetString() == "StructProperty"
+                    && tag.TryGetProperty("structName", out var sEl) && sEl.ValueKind == System.Text.Json.JsonValueKind.String)
+                    referencedStructNames.Add(sEl.GetString()!);
+                if (tag.TryGetProperty("inner", out var inEl)) CollectStructRefs(inEl);
+                if (tag.TryGetProperty("key", out var keyEl))  CollectStructRefs(keyEl);
+                if (tag.TryGetProperty("value", out var vEl))  CollectStructRefs(vEl);
+            }
+            // The entries carry `fields` as List<object> — we built them from
+            // Dictionary<string, object?> wrapped in anonymous objects. Walk
+            // back through jmapStructs directly to re-read the inner tags.
+            foreach (var p in jmapStructs.EnumerateObject())
+            {
+                if (!p.Value.TryGetProperty("properties", out var props)
+                    || props.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
+                foreach (var fp in props.EnumerateArray())
+                {
+                    if (!fp.TryGetProperty("inner", out var inner)) continue;
+                    // Re-serialize the Dictionary-shape our adapter produces
+                    // by calling InnerToTag. But we only need struct names —
+                    // walk the raw jmap shape recursively for "Struct": {name}.
+                    void WalkRaw(System.Text.Json.JsonElement el)
+                    {
+                        if (el.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            foreach (var kv in el.EnumerateObject())
+                            {
+                                if (kv.Name == "Struct" && kv.Value.ValueKind == System.Text.Json.JsonValueKind.Object
+                                    && kv.Value.TryGetProperty("name", out var n)
+                                    && n.ValueKind == System.Text.Json.JsonValueKind.String)
+                                    referencedStructNames.Add(n.GetString()!);
+                                WalkRaw(kv.Value);
+                            }
+                        }
+                        else if (el.ValueKind == System.Text.Json.JsonValueKind.Array)
+                            foreach (var c in el.EnumerateArray()) WalkRaw(c);
+                    }
+                    WalkRaw(inner);
+                }
+            }
+            bool anyDemoted2 = true;
+            while (anyDemoted2)
+            {
+                anyDemoted2 = false;
+                for (int i = classes.Count - 1; i >= 0; i--)
+                {
+                    var c = classes[i];
+                    var nm = (string)c.GetType().GetProperty("name")!.GetValue(c)!;
+                    if (referencedStructNames.Contains(nm))
+                    {
+                        structs.Add(c);
+                        structNames.Add(nm);
+                        classes.RemoveAt(i);
+                        anyDemoted2 = true;
+                    }
+                }
+            }
+            // Cascade: also demote classes whose super is now a struct.
+            bool anyDemoted3 = true;
+            while (anyDemoted3)
+            {
+                anyDemoted3 = false;
+                for (int i = classes.Count - 1; i >= 0; i--)
+                {
+                    var c = classes[i];
+                    var supr = (string?)c.GetType().GetProperty("super")!.GetValue(c);
+                    if (StructSuper(supr))
+                    {
+                        structs.Add(c);
+                        structNames.Add((string)c.GetType().GetProperty("name")!.GetValue(c)!);
+                        classes.RemoveAt(i);
+                        anyDemoted3 = true;
+                    }
+                }
+            }
         }
 
         if (jmapRoot.TryGetProperty("enums", out var jmapEnums)

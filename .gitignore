@@ -33,3 +33,9 @@ tests/.pytest_cache/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# transient / local
+*.stackdump
+.claude/
+__pycache__/
+*.pyc

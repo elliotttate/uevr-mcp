@@ -127,4 +127,74 @@ public class RenderManifestWriterTests
         Assert.Equal("right", transform["eye"]!.GetValue<string>());
         Assert.Single(transform["transforms"]!.AsArray());
     }
+
+    [Fact]
+    public async Task WriteDxilSemanticTransform_CreatesSemanticManifestPair()
+    {
+        var dir = NewTempDir();
+        var result = ParseObject(await RenderDiagnosticsTools.WriteDxilSemanticTransform(
+            "ABCDEF01",
+            "ps",
+            """{ "kind": "rewrite_cbuffer_load_index", "from_index": 2, "to_index": 6 }""",
+            eye: "right",
+            semanticTool: "uevr-dxil-semantic-pass.exe",
+            overrideDir: dir,
+            reload: false));
+
+        Assert.True(result["ok"]!.GetValue<bool>());
+        var manifest = ParseObject(await File.ReadAllTextAsync(result["manifest_path"]!.GetValue<string>()));
+        var transform = ParseObject(await File.ReadAllTextAsync(result["transform_path"]!.GetValue<string>()));
+        Assert.Equal("ps", manifest["stage"]!.GetValue<string>());
+        Assert.True(manifest["per_eye_variants"]!.GetValue<bool>());
+        Assert.Equal("semantic_transform.json", manifest["dxil_semantic_transform"]!.GetValue<string>());
+        Assert.Equal("uevr-dxil-semantic-pass.exe", manifest["semantic_tool"]!.GetValue<string>());
+        Assert.Equal("right", transform["eye"]!.GetValue<string>());
+        Assert.Single(transform["transforms"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task WritePerEyeShaderPayloads_CreatesLeftRightManifest()
+    {
+        var dir = NewTempDir();
+        var result = ParseObject(await RenderDiagnosticsTools.WritePerEyeShaderPayloads(
+            "ABCDEF01",
+            "ps",
+            leftTransformJson: """{ "kind": "rewrite_cbuffer_load_index", "to_index": 4, "required": false }""",
+            rightBytecodePath: "right.dxbc",
+            overrideDir: dir,
+            reload: false));
+
+        Assert.True(result["ok"]!.GetValue<bool>());
+        var manifest = ParseObject(await File.ReadAllTextAsync(result["manifest_path"]!.GetValue<string>()));
+        Assert.Equal("ps", manifest["stage"]!.GetValue<string>());
+        Assert.True(manifest["per_eye_variants"]!.GetValue<bool>());
+        Assert.Equal("left_transform.json", manifest["left_dxil_transform"]!.GetValue<string>());
+        Assert.Equal("right.dxbc", manifest["right_bytecode"]!.GetValue<string>());
+
+        var transformPath = Path.Combine(Path.GetDirectoryName(result["manifest_path"]!.GetValue<string>())!, "left_transform.json");
+        var transform = ParseObject(await File.ReadAllTextAsync(transformPath));
+        Assert.Single(transform["transforms"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task WritePerEyeShaderPayloads_CreatesSemanticPayload()
+    {
+        var dir = NewTempDir();
+        var result = ParseObject(await RenderDiagnosticsTools.WritePerEyeShaderPayloads(
+            "ABCDEF01",
+            "ps",
+            rightSemanticTransformJson: """{ "kind": "redirect_handle", "resource_class": "srv", "to_index": 2 }""",
+            semanticTool: "uevr-dxil-semantic-pass.exe",
+            overrideDir: dir,
+            reload: false));
+
+        Assert.True(result["ok"]!.GetValue<bool>());
+        var manifest = ParseObject(await File.ReadAllTextAsync(result["manifest_path"]!.GetValue<string>()));
+        Assert.Equal("right_semantic_transform.json", manifest["right_dxil_semantic_transform"]!.GetValue<string>());
+        Assert.Equal("uevr-dxil-semantic-pass.exe", manifest["semantic_tool"]!.GetValue<string>());
+
+        var transformPath = Path.Combine(Path.GetDirectoryName(result["manifest_path"]!.GetValue<string>())!, "right_semantic_transform.json");
+        var transform = ParseObject(await File.ReadAllTextAsync(transformPath));
+        Assert.Single(transform["transforms"]!.AsArray());
+    }
 }
