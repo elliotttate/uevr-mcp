@@ -48,7 +48,13 @@ public static class ExternalTools
 
     internal record RunResult(int ExitCode, string Stdout, string Stderr, string Command);
 
-    internal static async Task<RunResult> Run(string exe, IEnumerable<string> args, string? stdin = null, int timeoutMs = 60000, string? cwd = null)
+    internal static async Task<RunResult> Run(
+        string exe,
+        IEnumerable<string> args,
+        string? stdin = null,
+        int timeoutMs = 60000,
+        string? cwd = null,
+        IReadOnlyDictionary<string, string?>? env = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -61,6 +67,18 @@ public static class ExternalTools
             WorkingDirectory = cwd ?? Environment.CurrentDirectory,
         };
         psi.EnvironmentVariables["NO_COLOR"] = "1";
+        if (env is not null)
+        {
+            foreach (var (key, value) in env)
+            {
+                if (string.IsNullOrWhiteSpace(key))
+                    continue;
+                if (value is null)
+                    psi.EnvironmentVariables.Remove(key);
+                else
+                    psi.EnvironmentVariables[key] = value;
+            }
+        }
         foreach (var a in args) psi.ArgumentList.Add(a);
 
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {exe}");

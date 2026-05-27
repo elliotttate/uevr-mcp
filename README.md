@@ -17,7 +17,8 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that g
 - **Byte-compatible USMAP output.** Drop the file next to FModel / CUE4Parse / UAssetAPI to parse unversioned cooked assets for the game. Validated by round-tripping through jmap's own USMAP parser.
 - **Self-discovering reflection probes.** Property-subclass fields UEVR's public API doesn't expose (FObjectProperty::PropertyClass, FMapProperty::KeyProp, UClass::ClassFlags / ClassConfigName / Interfaces[], delegate signatures, UFunction::Script) get located at runtime via SEH-guarded memory probes with UObjectHook-backed validation — works across **UE4.22–UE5.5** without a hardcoded offset table. An `engineVersionHint` is reported alongside probe offsets so agents see which UE family they're on.
 - **Auto-compile-check emitter output.** `uevr_compile_check` copies the emitted UHT headers into any host `.uproject`, runs UnrealBuildTool against the game's reported engine association, parses MSVC + UHT diagnostics, and reports per-header pass/fail. Auto-filters headers whose name or declared type collides with the installed engine's own types (~4500 filtered on a typical AAA cooked game) via a two-pass macro scan of Engine/Source + Plugins. Validates the emitter against real UHT + Clang/MSVC instead of regex gut-checks.
-- **Works across games.** Same 172 tools work on any Unreal Engine game that UEVR supports (UE4.22–UE5.5 verified), plus a Dumper-7 fallback path for games too fragile for UEVR's render hooks.
+- **Native RenderDoc captures from MCP.** Launch through UEVRJ's suspended RenderDoc launcher, request `.rdc` captures, validate them with `renderdoccmd index-capture`, and extract thumbnails without hand-running scripts.
+- **Works across games.** Same 178 tools work on any Unreal Engine game that UEVR supports (UE4.22–UE5.5 verified), plus a Dumper-7 fallback path for games too fragile for UEVR's render hooks.
 
 ## Setup
 
@@ -471,9 +472,9 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 
 **`plugin/`** — A C++ DLL loaded by UEVR inside the game. Embeds Lua 5.4 + Sol2, cpp-httplib, nlohmann/json. Starts an HTTP server on `localhost:8899` exposing the gameplay API plus a diagnostics surface for structured logs, breadcrumbs, callback counters, plugin inventory, render metadata, and crash snapshots. Hooks into the engine tick, D3D present, D3D11 post-render, and XInput callbacks. HTTP handler threads submit work to the game thread via a `GameThreadQueue` (std::promise/future, up to 16 items per tick, 5s timeout) to safely access UE internals. A named pipe (`\\.\pipe\UEVR_MCP`) provides a secondary channel for status and log operations that work even before the HTTP server is ready.
 
-**`mcp-server/`** — A standalone .NET console app that speaks MCP over stdio. Translates tool calls into HTTP requests, falling back to the named pipe for status/log/game-info when HTTP is unavailable. Diagnostics tools map directly to the HTTP snapshot and per-surface diagnostics routes.
+**`mcp-server/`** — A standalone .NET console app that speaks MCP over stdio. Translates tool calls into HTTP requests, falling back to the named pipe for status/log/game-info when HTTP is unavailable. Diagnostics tools map directly to the HTTP snapshot and per-surface diagnostics routes. Host-side tools can also launch games through UEVRJ's RenderDoc launcher, write the RenderDoc capture sentinel, and validate `.rdc` files with `renderdoccmd.exe`.
 
-## 172 MCP Tools
+## 178 MCP Tools
 
 ### Setup & Lifecycle (8 tools)
 
@@ -553,6 +554,20 @@ The MCP server is a thin C# translation layer. Each MCP tool maps to one HTTP en
 |------|-------------|
 | `uevr_write_stability_config` | Write a conservative UEVR `config.txt` (ExtremeCompatibilityMode, 2DScreenMode, SkipPostInitProperties, etc.) to `%APPDATA%\UnrealVRMod\<GameName>\` before launch |
 | `uevr_suppress_d3d_monitor` | Enumerate threads in the target, suspend the UEVR worker threads that drive the 10-second rehook retry cycle (the classic "Last chance encountered for hooking" death loop) |
+
+### Host RenderDoc Capture (6 tools)
+
+See [`docs/renderdoc-capture.md`](docs/renderdoc-capture.md) for the full
+setup and one-call capture workflow.
+
+| Tool | Description |
+|------|-------------|
+| `uevr_renderdoc_paths` | Resolve UEVRJ/RenderDoc paths: launcher, backend, `renderdoc.dll`, `renderdoccmd.exe`, smoke app, and sentinel file |
+| `uevr_renderdoc_launch_game` | Launch a game through `UEVRRenderDocLauncher.exe` so RenderDoc is resident before first D3D12/DXGI object creation |
+| `uevr_renderdoc_request_capture` | Write `%TEMP%\uevr_renderdoc_capture.req`, wait for the `.rdc`, then optionally index and thumbnail it |
+| `uevr_renderdoc_capture_game` | One-call launch + startup wait + capture + validation flow |
+| `uevr_renderdoc_validate_capture` | Run `renderdoccmd index-capture` and `renderdoccmd thumb` on an existing `.rdc` |
+| `uevr_renderdoc_list_captures` | List recent `.rdc` captures from the common UEVR temp capture directories |
 
 ### Object Exploration (13 tools)
 
@@ -835,6 +850,7 @@ But the real power is in open-ended requests. You don't need to know the game's 
 - *"Use the ProcessEvent listener to figure out what happens when I open a chest, then hook those functions."*
 - *"Make the world feel twice as big — adjust the VR scale."*
 - *"Dump this game as a buildable UE4 project — I want to read the source in my editor."*
+- *"Launch this DX12 game through UEVRJ's RenderDoc path, capture a frame, validate the `.rdc`, and show me the thumbnail."*
 
 ### End-to-end: dump a game you've never touched before
 

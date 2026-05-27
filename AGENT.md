@@ -76,6 +76,24 @@ Step types:
 ### Game & System Info
 - `uevr_get_game_info` — game exe path, directory, VR runtime, uptime (works via pipe fallback)
 
+### RenderDoc Capture
+
+Use these host-side tools when you need a native `.rdc` that opens in RenderDoc.
+They can launch and capture even before the in-game HTTP plugin is ready:
+
+```
+uevr_renderdoc_paths()                         → verify UEVRJ/RenderDoc paths
+uevr_renderdoc_launch_game(gameExe, gameArgs)  → suspended launch, RenderDoc first
+uevr_renderdoc_request_capture()               → write sentinel, wait for .rdc, validate
+uevr_renderdoc_capture_game(gameExe, ...)      → launch + capture + validate in one call
+uevr_renderdoc_validate_capture(rdcPath)       → index/thumb an existing .rdc
+uevr_renderdoc_list_captures()                 → find recent captures
+```
+
+For 1:1 captures, launch with `uevr_renderdoc_launch_game` or
+`uevr_renderdoc_capture_game`; normal late injection cannot retroactively wrap
+D3D12 objects that the game already created.
+
 ### Lua Execution (Live Coding)
 Execute Lua code directly in the game process with full UEVR API access:
 ```

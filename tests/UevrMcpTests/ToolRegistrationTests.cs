@@ -60,7 +60,10 @@ public class ToolRegistrationTests
         "uevr_render_sn2_state", "uevr_render_pso_input_report",
         "uevr_render_descriptor_slot_report", "uevr_render_lineage_diff_for_pso",
         "uevr_render_write_dxil_probe_transform", "uevr_render_override_proof",
-        "uevr_render_write_sn2_clean_launch_script"
+        "uevr_render_write_sn2_clean_launch_script",
+        "uevr_renderdoc_paths", "uevr_renderdoc_launch_game",
+        "uevr_renderdoc_request_capture", "uevr_renderdoc_capture_game",
+        "uevr_renderdoc_validate_capture", "uevr_renderdoc_list_captures"
     };
 
     static readonly HashSet<string> ExpectedTools = new()
