@@ -243,8 +243,7 @@ void Diagnostics::write_breadcrumb_locked(bool force) {
     const auto status = m_breadcrumb_state.value("status", std::string{});
     const auto now = std::chrono::steady_clock::now();
 
-    const bool state_changed = callback != m_last_breadcrumb_callback || status != m_last_breadcrumb_status;
-    if (!force && !state_changed && now - m_last_breadcrumb_flush < BREADCRUMB_FLUSH_INTERVAL) {
+    if (!force && now - m_last_breadcrumb_flush < BREADCRUMB_FLUSH_INTERVAL) {
         return;
     }
 
